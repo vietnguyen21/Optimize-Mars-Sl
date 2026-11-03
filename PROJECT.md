@@ -1,5 +1,5 @@
 # Project: Text-to-SQL SLM Research Architecture (Director-Led SSoT)
-
+## puppyvn :>
 ## Architecture
 - **Architecture Paradigm**: Director-Led Single Source of Truth (SSoT) Multi-Agent Architecture (`AGENTS_RESEARCH.md`).
 - **Core Problem Solved**: Replaces MARS-SQL 21B (41-47 GB VRAM, 22s latency, structural blindness, hallucinations, uncalibrated decisions) with an optimized Small Language Model (SLM) pipeline (2.5B–4.0B, <6s latency, 3.5–8.5 GB VRAM).
