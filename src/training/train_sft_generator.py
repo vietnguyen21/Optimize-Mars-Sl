@@ -361,23 +361,117 @@ def run_dry_run(
     }
 
 
+def load_sft_records(data_path: str, db_dir: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Loads SFT records with a `formatted_prompt` field (prompt + <think>...</think><answer>SQL</answer>).
+    Records that already carry `formatted_prompt` (SynSQL) are kept; BIRD-style records
+    (question, evidence, SQL, db_id) are formatted with the same prompt the evaluator uses.
+    """
+    from src.evaluation.candidate_generator import build_prompt
+    from src.evaluation.evaluate_end_to_end import load_schema_ddl
+
+    records = []
+    with open(data_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            if not item.get("formatted_prompt"):
+                ddl = item.get("schema", "")
+                if not ddl and db_dir:
+                    ddl = load_schema_ddl(os.path.join(db_dir, f"{item['db_id']}.sqlite"))
+                prompt = build_prompt(item["question"], item.get("evidence", ""), ddl)
+                think = item.get("think_steps", "")
+                item["formatted_prompt"] = f"{prompt}\n{think}\n</think>\n<answer>\n{item['SQL']}\n</answer>"
+            records.append({"formatted_prompt": item["formatted_prompt"]})
+    if not records:
+        raise ValueError(f"No SFT records found in {data_path}")
+    return records
+
+
 def run_sft_training(
     data_path: str = "data/mini/mini_synsql.jsonl",
-    output_dir: str = "/content/checkpoints/sft_jepa_3b",
+    output_dir: str = "/content/checkpoints/sft_3b",
     drive_dir: Optional[str] = None,
     epochs: int = 3,
     batch_size: int = 2,
     learning_rate: float = 2e-4,
     dry_run: bool = True,
+    model_name_or_path: str = "Qwen/Qwen2.5-Coder-3B-Instruct",
+    db_dir: Optional[str] = None,
+    lora_rank: int = 64,
+    lora_alpha: int = 16,
+    resume_from_checkpoint: Optional[str] = None,
     **kwargs: Any
 ) -> Dict[str, Any]:
-    """Runner function executing SFT + JEPA training (dry-run or full)."""
-    return run_dry_run(data_path=data_path)
+    """
+    Completion-only SFT with LoRA. dry_run=True runs the offline verification only.
+    Note: the LLM-JEPA loss is not integrated into this trainer yet.
+    """
+    if dry_run:
+        return run_dry_run(data_path=data_path)
+    if not (TRANSFORMERS_AVAILABLE and TORCH_AVAILABLE and PEFT_AVAILABLE):
+        raise RuntimeError("Full SFT requires torch, transformers and peft.")
+
+    resume_path = get_resume_checkpoint(resume_from_checkpoint, output_dir, drive_dir)
+    if resume_path:
+        logger.info(f"Resuming training from checkpoint: {resume_path}")
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    records = load_sft_records(data_path, db_dir)
+    for r in records:
+        r["formatted_prompt"] += tokenizer.eos_token
+
+    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name_or_path,
+        torch_dtype=torch.bfloat16 if use_bf16 else torch.float16,
+        device_map="auto",
+        trust_remote_code=True
+    )
+    model = get_peft_model(model, build_lora_config(rank=lora_rank, alpha=lora_alpha))
+    model.print_trainable_parameters()
+
+    callbacks = []
+    if drive_dir:
+        callbacks.append(DriveCheckpointCallback(drive_checkpoint_dir=drive_dir, local_checkpoint_dir=output_dir))
+
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        learning_rate=learning_rate,
+        per_device_train_batch_size=batch_size,
+        num_train_epochs=epochs,
+        save_strategy="steps",
+        save_steps=500,
+        logging_steps=50,
+        remove_unused_columns=False,  # collator reads the raw `formatted_prompt` field
+        gradient_checkpointing=True,
+        bf16=use_bf16,
+        fp16=torch.cuda.is_available() and not use_bf16
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=records,
+        data_collator=CompletionOnlyDataCollator(tokenizer=tokenizer),
+        callbacks=callbacks
+    )
+    result = trainer.train(resume_from_checkpoint=resume_path)
+    best_dir = os.path.join(output_dir, "best_model")
+    trainer.save_model(best_dir)
+    tokenizer.save_pretrained(best_dir)
+    logger.info("Training complete and model saved.")
+    return {"train_loss": result.training_loss, "global_step": result.global_step,
+            "num_records": len(records), "saved_to": best_dir}
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Completion-Only SFT Trainer for Text-to-SQL SLMs")
-    parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-Coder-7B-Instruct",
+    parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-Coder-3B-Instruct",
                         help="HuggingFace model ID or local path (e.g., FINER-SQL-3B or Qwen2.5-Coder-7B)")
     parser.add_argument("--data_path", type=str, default="data/mini/mini_synsql.jsonl",
                         help="Path to SFT JSONL dataset")
@@ -397,6 +491,8 @@ def parse_args():
                         help="Number of training epochs")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None,
                         help="Checkpoint path or 'latest' to resume from Google Drive / local")
+    parser.add_argument("--db_dir", type=str, default=None,
+                        help="SQLite directory used to build schema DDL for BIRD-style records")
     parser.add_argument("--dry_run", action="store_true",
                         help="Run dry run verification on mini dataset without loading heavy model")
     return parser.parse_args()
@@ -411,63 +507,21 @@ def main():
         sys.exit(0)
 
     logger.info(f"Starting SFT Trainer on model: {args.model_name_or_path}")
-
-    # Check for resume checkpoint
-    resume_path = get_resume_checkpoint(args.resume_from_checkpoint, args.output_dir, args.drive_dir)
-    if resume_path:
-        logger.info(f"Resuming training from checkpoint: {resume_path}")
-
-    if not (TRANSFORMERS_AVAILABLE and TORCH_AVAILABLE):
-        logger.warning("PyTorch and Transformers not found in this environment. Falling back to --dry_run mode.")
-        result = run_dry_run(data_path=args.data_path)
-        print(json.dumps(result, indent=2))
-        sys.exit(0)
-
-    # Full HuggingFace training execution
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name_or_path,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
-        device_map="auto",
-        trust_remote_code=True
-    )
-
-    if PEFT_AVAILABLE:
-        lora_config = build_lora_config(rank=args.lora_rank, alpha=args.lora_alpha)
-        model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()
-
-    drive_callback = DriveCheckpointCallback(
-        drive_checkpoint_dir=args.drive_dir,
-        local_checkpoint_dir=args.output_dir
-    )
-
-    training_args = TrainingArguments(
+    result = run_sft_training(
+        data_path=args.data_path,
         output_dir=args.output_dir,
+        drive_dir=args.drive_dir,
+        epochs=args.num_epochs,
+        batch_size=args.batch_size,
         learning_rate=args.learning_rate,
-        per_device_train_batch_size=args.batch_size,
-        num_train_epochs=args.num_epochs,
-        save_strategy="steps",
-        save_steps=500,
-        logging_steps=50,
-        bf16=torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False,
-        fp16=not torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False
+        dry_run=False,
+        model_name_or_path=args.model_name_or_path,
+        db_dir=args.db_dir,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        resume_from_checkpoint=args.resume_from_checkpoint
     )
-
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        tokenizer=tokenizer,
-        data_collator=CompletionOnlyDataCollator(tokenizer=tokenizer),
-        callbacks=[drive_callback]
-    )
-
-    trainer.train(resume_from_checkpoint=resume_path)
-    trainer.save_model(os.path.join(args.output_dir, "best_model"))
-    logger.info("Training complete and model saved.")
+    print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

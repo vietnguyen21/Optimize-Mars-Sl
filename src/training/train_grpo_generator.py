@@ -541,6 +541,8 @@ def run_grpo_training(
     **kwargs: Any
 ) -> Dict[str, Any]:
     """Runner function executing Dense GRPO training (dry-run or full)."""
+    if not dry_run:
+        raise NotImplementedError("Full GRPO training is not implemented yet; only --dry_run verification exists.")
     group_size = kwargs.get("group_size", num_rollouts)
     return run_dry_run(mini_bird_path=data_path, db_dir=db_dir, group_size=group_size)
 
@@ -565,10 +567,7 @@ def main():
         print(json.dumps(result, indent=2))
         sys.exit(0)
 
-    logger.info("Executing Dense GRPO Trainer in full mode.")
-    # Fallback to dry run if external model weights are not loaded locally
-    result = run_dry_run(mini_bird_path=args.data_path, db_dir=args.db_dir, group_size=args.group_size)
-    print(json.dumps(result, indent=2))
+    raise NotImplementedError("Full GRPO training is not implemented yet; only --dry_run verification exists.")
 
 
 if __name__ == "__main__":

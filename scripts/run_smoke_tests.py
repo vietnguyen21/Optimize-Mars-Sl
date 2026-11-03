@@ -7,13 +7,15 @@ Executes all 6 validation tiers sequentially without requiring heavy GPU or larg
 3. Suite 3: Colab Training Notebooks (Dynamic cell-by-cell execution of 49 code cells across 5 notebooks)
 4. Suite 4: Grammar PDA & Validation Rules (XGrammar PDA, Fallback Engine, PV-SQL 10 AST rules, DB Probe)
 5. Suite 5: Evaluation & Benchmark Suite (Candidate Generator 8-16 rollouts, Multiset EX, VSR, ECE, Latency)
-6. Suite 6: End-to-End Benchmark Execution on data/mini/mini_bird.jsonl (EX >= 75%, VSR = 100%, ECE <= 0.081, Latency < 5.8s)
+6. Suite 6: End-to-End harness wiring on data/mini/mini_bird.jsonl with a stub model (no gold leak; not a quality benchmark)
 
 Total execution must complete in < 60.0 seconds on standard CPU.
 Returns exit code 0 if all suites pass; non-zero if any test fails.
 """
 
 import io
+import json
+import tempfile
 import os
 import sys
 import time
@@ -119,46 +121,39 @@ def run_suite_6_e2e_benchmark(
     db_dir: str = "data/mini"
 ) -> Tuple[bool, int, float, Dict[str, Any], str]:
     """
-    Executes Suite 6: Full end-to-end benchmark harness over sample queries in data/mini/mini_bird.jsonl.
-    Validates execution accuracy (EX >= 75%), valid SQL rate (VSR = 100%), ECE (<= 0.081), and latency (< 5.8s).
+    Executes Suite 6: end-to-end harness wiring over data/mini/mini_bird.jsonl with a stub model.
+    Checks that the pipeline completes, evaluates every query, and that no gold SQL reaches the
+    generator prompt. It does not measure model quality: real EX needs a trained checkpoint.
     """
+    from tests.stub_lm import StubModel, StubTokenizer
     start_time = time.perf_counter()
-    error_msg = ""
 
     try:
-        harness = EvaluationHarness(
-            db_dir=db_dir,
-            num_candidates=8,
-            temperature=0.7,
-            early_exit_threshold=0.85
-        )
-        with silence_all_output():
-            results = harness.evaluate_dataset(dataset_path)
+        with open(dataset_path, encoding="utf-8") as f:
+            golds = [json.loads(line)["SQL"] for line in f if line.strip()]
+        tokenizer = StubTokenizer()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            harness = EvaluationHarness(
+                db_dir=db_dir,
+                num_candidates=4,
+                output_log_dir=tmp_dir,
+                output_report_dir=tmp_dir,
+                model=StubModel(),
+                tokenizer=tokenizer
+            )
+            with silence_all_output():
+                results = harness.evaluate_dataset(dataset_path)
         elapsed = time.perf_counter() - start_time
 
         total_queries = results.get("total_queries", 0)
-        ex = results.get("execution_accuracy", 0.0)
-        vsr = results.get("valid_sql_rate", 0.0)
-        ece = results.get("ece", 1.0)
-        latency_ms = results.get("latency", {}).get("mean_ms", 99999.0)
-        latency_s = latency_ms / 1000.0
-
-        # Acceptance Criteria Assertions
         failures = []
-        if total_queries != 24:
-            failures.append(f"Expected 24 queries evaluated, got {total_queries}")
-        if ex < 75.0:
-            failures.append(f"Execution Accuracy (EX) {ex:.2f}% is below target >= 75.0%")
-        if vsr < 99.9:
-            failures.append(f"Valid SQL Rate (VSR) {vsr:.2f}% is below target 100.0%")
-        if ece > 0.081:
-            failures.append(f"Expected Calibration Error (ECE) {ece:.4f} exceeds target <= 0.081")
-        if latency_s >= 5.8:
-            failures.append(f"Average Latency {latency_s:.2f}s exceeds target < 5.8s")
-
+        if total_queries != len(golds):
+            failures.append(f"Expected {len(golds)} queries evaluated, got {total_queries}")
+        leaked = [g for g, p in zip(golds, tokenizer.prompts) if g.strip().rstrip(";") in p]
+        if leaked:
+            failures.append(f"Gold SQL leaked into {len(leaked)} generator prompts")
         if failures:
             return False, total_queries, elapsed, results, "; ".join(failures)
-
         return True, total_queries, elapsed, results, ""
 
     except Exception as e:
@@ -289,7 +284,7 @@ def main():
             failure_details.append(f"{conf['name']}:\n{err}")
 
     # Run Suite 6: End-to-End Benchmark Execution
-    s6_name = "Suite 6: End-to-End Mini-BIRD Benchmark (24 Queries)"
+    s6_name = "Suite 6: End-to-End Wiring + No-Gold-Leak Check (stub model)"
     print(f"{TermColors.BOLD}[RUNNING]{TermColors.RESET} {s6_name} on data/mini/mini_bird.jsonl...", flush=True)
     ok_6, count_6, elapsed_6, bench_results, err_6 = run_suite_6_e2e_benchmark(
         dataset_path=os.path.join(REPO_ROOT, "data", "mini", "mini_bird.jsonl"),

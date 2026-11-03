@@ -48,9 +48,12 @@ class LayaScorer:
         model_path: Optional[str] = None,
         threshold: float = 0.75,
         temperature: float = 0.20,
-        early_exit_threshold: float = 0.85
+        early_exit_threshold: float = 0.85,
+        calibration_temperature: float = 1.0
     ):
         self.model_path = model_path
+        # Fit on cal-DB with temperature scaling; 1.0 means uncalibrated.
+        self.calibration_temperature = max(1e-4, calibration_temperature)
         self.threshold = threshold
         self.temperature = max(1e-4, temperature)
         self.early_exit_threshold = early_exit_threshold
@@ -59,18 +62,30 @@ class LayaScorer:
         self.tokenizer = None
         self._init_model()
 
+    @property
+    def scorer_type(self) -> str:
+        """'model' when a trained checkpoint scores candidates, else 'heuristic' (keyword baseline)."""
+        return "model" if self.model is not None else "heuristic"
+
     def _init_model(self) -> None:
-        """Loads ModernBERT model if model_path is provided and environment supports torch."""
+        """Loads the trained cross-encoder if model_path is given. A load failure raises."""
         if self.model_path:
-            try:
-                import torch
-                from transformers import AutoModelForSequenceClassification, AutoTokenizer
-                self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
-                self.model = AutoModelForSequenceClassification.from_pretrained(self.model_path)
-                self.model.eval()
-            except Exception:
-                self.model = None
-                self.tokenizer = None
+            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+            self.model = AutoModelForSequenceClassification.from_pretrained(self.model_path)
+            self.model.eval()
+
+    def _compute_model_logit(self, question: str, schema_ddl: str, sql: str) -> float:
+        """Correctness logit from the trained cross-encoder on (question + schema, sql)."""
+        import torch
+        inputs = self.tokenizer(f"{question}\n{schema_ddl}", sql, truncation=True, return_tensors="pt")
+        device = getattr(self.model, "device", None)
+        if device is not None:
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+        with torch.no_grad():
+            logits = self.model(**inputs).logits[0]
+        # 1 label: raw logit; 2 labels: log-odds of class 1 ("correct").
+        return float(logits[0]) if logits.shape[-1] == 1 else float(logits[1] - logits[0])
 
     def _extract_schema_tables(self, schema_ddl: str) -> List[str]:
         """Extracts table names from schema DDL."""
@@ -128,11 +143,13 @@ class LayaScorer:
 
     def score_candidate(self, question: str, schema_ddl: str, sql: str) -> float:
         """
-        Calculates calibrated confidence probability P in [0.0, 1.0] for a candidate SQL.
+        Confidence P in [0.0, 1.0] for a candidate SQL. Uses the trained model when loaded;
+        otherwise the keyword heuristic baseline (check `scorer_type` and report it).
         """
-        logit = self._compute_calibrated_logit(question, schema_ddl, sql)
-        # Calibrated temperature scaling
-        scaled = logit / self.temperature
+        if self.model is not None:
+            scaled = self._compute_model_logit(question, schema_ddl, sql) / self.calibration_temperature
+        else:
+            scaled = self._compute_calibrated_logit(question, schema_ddl, sql) / self.temperature
         # Numerically stable sigmoid
         if scaled >= 0:
             prob = 1.0 / (1.0 + math.exp(-scaled))

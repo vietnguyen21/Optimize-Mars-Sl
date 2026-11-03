@@ -1,7 +1,7 @@
 """
 Benchmark Metrics Computation Suite for Text-to-SQL SLM Architecture.
 Computes:
-1. Execution Accuracy (EX): Exact multiset match between generated and gold queries.
+1. Execution Accuracy (EX): BIRD official rule, set(pred_rows) == set(gold_rows).
 2. Valid SQL Rate (VSR): Percentage of queries executing with 0 syntax/runtime errors.
 3. Expected Calibration Error (ECE): 10-bin calibration error of confidence predictions.
 4. Latency Statistics: Mean, median, P95, P99 in milliseconds.
@@ -11,9 +11,9 @@ Computes:
 
 import math
 import os
-import resource
 import sqlite3
 import statistics
+import time
 from typing import List, Tuple, Dict, Any, Optional, Set, Union
 
 
@@ -58,29 +58,32 @@ def normalize_query_result(rows: Any) -> Any:
 
 def compare_sql_results(res1: Any, res2: Any) -> bool:
     """
-    Compares two query result sets for equivalence.
-    Returns True if sets match after normalization.
+    BIRD official equivalence: set(res1) == set(res2) on raw result rows
+    (order and duplicates ignored, no rounding or type coercion).
     """
-    norm1 = normalize_query_result(res1)
-    norm2 = normalize_query_result(res2)
-    return norm1 == norm2
+    return set(res1 or []) == set(res2 or [])
 
 
-def execute_query_safely(sql: str, db_path: str, timeout: float = 3.0) -> Tuple[bool, Any]:
+def execute_query_safely(sql: str, db_path: str, timeout: float = 30.0) -> Tuple[bool, Any]:
     """
-    Executes SQL query on SQLite database and returns (success: bool, rows_or_error: Any).
+    Executes SQL read-only on SQLite and returns (success, rows_or_error).
+    `timeout` bounds query execution time in seconds (BIRD official uses 30 s).
     """
     if not os.path.exists(db_path):
         return False, f"Database not found: {db_path}"
+    conn = None
     try:
-        conn = sqlite3.connect(db_path, timeout=timeout)
-        cursor = conn.cursor()
-        cursor.execute(sql.strip())
-        rows = cursor.fetchall()
-        conn.close()
+        conn = sqlite3.connect(f"file:{os.path.abspath(db_path)}?mode=ro", uri=True)
+        deadline = time.monotonic() + timeout
+        # Non-zero return aborts the running statement with "interrupted".
+        conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 10000)
+        rows = conn.execute(sql.strip()).fetchall()
         return True, rows
     except Exception as err:
         return False, str(err)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def compute_execution_accuracy(
@@ -210,9 +213,13 @@ def measure_memory_footprint() -> Dict[str, Any]:
     """
     Measures current process RAM footprint and GPU VRAM footprint (if available).
     """
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    # ru_maxrss is in kilobytes on Linux
-    ram_mb = usage.ru_maxrss / 1024.0
+    ram_mb = 0.0
+    try:
+        import resource  # Unix only
+        # ru_maxrss is in kilobytes on Linux
+        ram_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    except ImportError:
+        pass
 
     gpu_vram_mb = 0.0
     try:
@@ -234,8 +241,7 @@ def format_benchmark_summary(
     title: str = "Benchmark Evaluation Summary"
 ) -> str:
     """
-    Generates publication-ready Markdown table comparing current evaluation against
-    established research baselines (MARS-SQL 21B, Combo A, Combo C).
+    Generates a Markdown table of measured metrics only (no hard-coded baselines or targets).
     """
     ex = metrics.get("execution_accuracy", 0.0)
     vsr = metrics.get("valid_sql_rate", 0.0)
@@ -247,23 +253,16 @@ def format_benchmark_summary(
 
     table = f"""# {title}
 
-### Core Evaluation Metrics (Total Queries Evaluated: {total_q})
-| Metric | Measurement | Target Standard | Status |
-|:-------|:------------|:----------------|:-------|
-| **Execution Accuracy (EX)** | **{ex:.2f}%** | $\\ge 75.0\\%$ | {'✅ PASSED' if ex >= 75.0 else '🔍 EVALUATED'} |
-| **Valid SQL Rate (VSR)** | **{vsr:.2f}%** | $100.0\\%$ (XGrammar) | {'✅ 100%' if vsr >= 99.9 else f'{vsr:.1f}%'} |
-| **Expected Calibration Error (ECE)** | **{ece:.4f}** | $\\le 0.081$ | {'✅ CALIBRATED' if ece <= 0.081 else '⚠️ TUNING'} |
-| **Average End-to-End Latency** | **{latency_ms:.2f} ms** ({latency_s:.2f}s) | $\\le 5.8$ seconds | {'✅ FAST' if latency_s <= 5.8 else '⚠️ SLOW'} |
-| **GPU VRAM Footprint** | **{vram:.2f} GB** | $\\le 8.5$ GB | {'✅ LOW VRAM' if vram <= 8.5 else '⚠️ HIGH'} |
+Measured on {total_q} queries. Only measured values are reported here; baselines and
+targets belong in the paper with their sources.
 
-### Scientific Comparison vs. Baselines
-| System / Architecture | Model Size | EX (BIRD-dev) | VSR | Avg Latency | Peak VRAM |
-|:----------------------|:----------:|:-------------:|:---:|:-----------:|:---------:|
-| **MARS-SQL 21B (Baseline)** | 21.0B | 74.8% | 78.6% – 92.9% | ~22.0 s | 41.0 – 47.0 GB |
-| **Combo A (Ultra-Light)** | 1.5B | 69.5% – 72.0% | 100.0% | ~3.8 s | < 8.0 GB RAM |
-| **Combo C (Pareto SOTA)** | 3.0B | 75.0% – 76.8% | 100.0% | ~5.2 s | 8.0 – 16.0 GB |
-| **Our Evaluated Pipeline** | **SLM (3B/7B)** | **{ex:.2f}%** | **{vsr:.2f}%** | **{latency_s:.2f} s** | **{vram:.2f} GB** |
-
-*Generated by Text-to-SQL SLM Evaluation Suite (Milestone M4).*
+| Metric | Measurement |
+|:-------|:------------|
+| **Execution Accuracy (EX)** | **{ex:.2f}%** |
+| **Valid SQL Rate (VSR)** | **{vsr:.2f}%** |
+| **Expected Calibration Error (ECE)** | **{ece:.4f}** |
+| **Average End-to-End Latency** | **{latency_ms:.2f} ms** ({latency_s:.2f}s) |
+| **Peak GPU VRAM** | **{vram:.2f} GB** |
+| **System-1 scorer** | {metrics.get("scorer_type", "unknown")} |
 """
     return table.strip()

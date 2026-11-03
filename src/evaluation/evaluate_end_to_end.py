@@ -13,6 +13,7 @@ import argparse
 import json
 import logging
 import os
+import sqlite3
 import sys
 import time
 
@@ -50,6 +51,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("EvaluateEndToEnd")
 
 
+def load_schema_ddl(db_path: str) -> str:
+    """Full CREATE TABLE DDL of a SQLite database.
+
+    shortcut: passes the whole schema, not Agent 1's Steiner sub-schema S'; switch to
+    src.grounding output once the retriever is trained.
+    """
+    conn = sqlite3.connect(f"file:{os.path.abspath(db_path)}?mode=ro", uri=True)
+    try:
+        rows = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL").fetchall()
+    finally:
+        conn.close()
+    return "\n\n".join(r[0].strip() + ";" for r in rows)
+
+
 class EvaluationHarness:
     """
     Orchestrates the entire end-to-end evaluation pipeline over a test dataset.
@@ -65,7 +80,10 @@ class EvaluationHarness:
         decision_threshold: float = 0.75,
         output_log_dir: str = "logs",
         output_report_dir: str = "reports",
-        model_path: Optional[str] = None
+        model_path: Optional[str] = None,
+        scorer_model_path: Optional[str] = None,
+        model: Optional[Any] = None,
+        tokenizer: Optional[Any] = None
     ):
         self.db_dir = db_dir
         self.num_candidates = num_candidates
@@ -80,16 +98,15 @@ class EvaluationHarness:
         # Initialize sub-modules
         self.grammar_engine = get_grammar_engine(grammar_engine_type)
 
-        model = None
-        tokenizer = None
-        if model_path and os.path.exists(model_path):
-            try:
-                from transformers import AutoModelForCausalLM, AutoTokenizer
-                logger.info(f"Loading model checkpoint from {model_path}...")
-                tokenizer = AutoTokenizer.from_pretrained(model_path)
-                model = AutoModelForCausalLM.from_pretrained(model_path)
-            except Exception as e:
-                logger.warning(f"Could not load model from {model_path}: {e}. Falling back to ablation generator.")
+        # A load failure must stop the run: there is no fallback generator.
+        if model is None and model_path:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            logger.info(f"Loading model checkpoint from {model_path}...")
+            dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+            model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=dtype, device_map="auto")
+            model.eval()
 
         self.candidate_generator = CandidateGenerator(
             model=model,
@@ -100,6 +117,7 @@ class EvaluationHarness:
         self.pv_validator = PVSQLValidator()
         self.db_probe = DBProbeEngine(max_session_queries=5, row_limit=5)
         self.scorer = LayaScorer(
+            model_path=scorer_model_path,
             threshold=decision_threshold,
             early_exit_threshold=early_exit_threshold
         )
@@ -146,12 +164,13 @@ class EvaluationHarness:
             db_id = item.get("db_id", "")
             db_file = os.path.join(self.db_dir, f"{db_id}.sqlite")
 
-            # 1. Candidate rollouts (8 to 16 rollouts)
+            # 1. Candidate rollouts (8 to 16 rollouts). Gold SQL is used only for scoring below.
             candidates = self.candidate_generator.generate(
                 prompt_or_input=question,
-                gold_sql=gold_sql,
                 num_candidates=self.num_candidates,
-                temperature=self.temperature
+                temperature=self.temperature,
+                evidence=item.get("evidence", ""),
+                schema_ddl=load_schema_ddl(db_file)
             )
 
             # 2. Candidate Selection via Grammar PDA + PV-SQL + DB Probe + System-1 Gate
@@ -255,6 +274,7 @@ class EvaluationHarness:
         benchmark_results = {
             "dataset": os.path.basename(dataset_path),
             "total_queries": len(records),
+            "scorer_type": self.scorer.scorer_type,
             "execution_accuracy": ex,
             "valid_sql_rate": vsr,
             "ece": ece,
@@ -287,12 +307,14 @@ def evaluate_end_to_end(
     dataset_path: str = "data/mini/mini_bird.jsonl",
     db_dir: str = "data/mini",
     num_candidates: int = 8,
-    model_path: Optional[str] = None
+    model_path: Optional[str] = None,
+    scorer_model_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Convenience functional API for end-to-end evaluation.
     """
-    harness = EvaluationHarness(db_dir=db_dir, num_candidates=num_candidates, model_path=model_path)
+    harness = EvaluationHarness(db_dir=db_dir, num_candidates=num_candidates, model_path=model_path,
+                                scorer_model_path=scorer_model_path)
     return harness.evaluate_dataset(dataset_path)
 
 
@@ -302,13 +324,16 @@ def main():
     parser.add_argument("--db_dir", type=str, default="data/mini", help="Directory containing target SQLite DBs")
     parser.add_argument("--num_candidates", type=int, default=8, help="Number of candidate rollouts (8-16)")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of queries to evaluate")
-    parser.add_argument("--model_path", type=str, default=None, help="Path to fine-tuned model checkpoint (optional)")
+    parser.add_argument("--model_path", type=str, required=True, help="Path to fine-tuned generator checkpoint")
+    parser.add_argument("--scorer_model_path", type=str, default=None,
+                        help="Path to trained System-1 scorer; without it the heuristic baseline scorer is used and reported as such")
     args = parser.parse_args()
 
     harness = EvaluationHarness(
         db_dir=args.db_dir,
         num_candidates=args.num_candidates,
-        model_path=args.model_path
+        model_path=args.model_path,
+        scorer_model_path=args.scorer_model_path
     )
     results = harness.evaluate_dataset(args.dataset, limit_samples=args.limit)
     print("\n" + format_benchmark_summary(results))

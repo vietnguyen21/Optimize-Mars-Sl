@@ -315,6 +315,8 @@ def run_decision_model_training(
     **kwargs: Any
 ) -> Dict[str, Any]:
     """Runner function executing System-1 decision model training (dry-run or full)."""
+    if not dry_run:
+        raise NotImplementedError("Full System-1 decision model training is not implemented yet; only --dry_run verification exists.")
     res = run_dry_run(num_samples=100, target_ece_threshold=target_ece)
     target_export = export_dir or drive_dir or output_dir
     if target_export:
@@ -342,9 +344,7 @@ def main():
         print(json.dumps(res, indent=2))
         sys.exit(0)
 
-    logger.info("Executing Laya-421M RLCD Trainer in full mode.")
-    res = run_dry_run()
-    print(json.dumps(res, indent=2))
+    raise NotImplementedError("Full System-1 decision model training is not implemented yet; only --dry_run verification exists.")
 
 
 if __name__ == "__main__":

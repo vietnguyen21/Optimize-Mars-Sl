@@ -12,7 +12,7 @@ import unittest
 
 from src.evaluation import (
     CandidateGenerator,
-    generate_candidate_rollouts,
+    build_prompt,
     EvaluationHarness,
     evaluate_end_to_end,
     normalize_query_result
@@ -28,79 +28,60 @@ from src.evaluation.metrics import (
     execute_query_safely
 )
 from src.common.schemas import SQLCandidate, GenerationInput, CompactSubSchema
+from tests.stub_lm import StubModel, StubTokenizer
 
 
 class TestCandidateGenerator(unittest.TestCase):
-    """Tests multi-candidate trajectory generation (8-16 rollouts)."""
+    """Candidate generation from a loaded model; no gold SQL, no fabricated candidates."""
 
     def setUp(self):
-        self.generator = CandidateGenerator(default_num_candidates=8, default_temperature=0.7)
-        self.sample_question = "What is the total account balance?"
-        self.sample_gold = "SELECT SUM(balance) FROM accounts;"
+        self.tokenizer = StubTokenizer()
+        self.generator = CandidateGenerator(model=StubModel(), tokenizer=self.tokenizer, default_num_candidates=8)
 
-    def test_generate_8_candidates(self):
-        candidates = self.generator.generate(
-            prompt_or_input=self.sample_question,
-            gold_sql=self.sample_gold,
-            num_candidates=8
-        )
+    def test_no_model_raises(self):
+        with self.assertRaises(RuntimeError):
+            CandidateGenerator().generate("What is the total account balance?")
+
+    def test_gold_sql_is_not_an_input(self):
+        with self.assertRaises(TypeError):
+            self.generator.generate("q", gold_sql="SELECT 1;")
+
+    def test_generate_8_candidates_parses_answer(self):
+        candidates = self.generator.generate("What is the total account balance?", num_candidates=8)
         self.assertEqual(len(candidates), 8)
         for idx, c in enumerate(candidates):
             self.assertIsInstance(c, SQLCandidate)
             self.assertEqual(c.candidate_id, idx)
-            self.assertTrue(c.sql.strip().endswith(";"))
-            self.assertTrue(len(c.reasoning) > 0)
-            self.assertIsInstance(c.logprob, float)
+            self.assertEqual(c.sql, "SELECT 1;")
+            self.assertEqual(c.reasoning, "reasoning")
 
-    def test_generate_16_candidates_ablation(self):
-        candidates = self.generator.generate(
-            prompt_or_input=self.sample_question,
-            gold_sql=self.sample_gold,
-            num_candidates=16,
-            temperature=0.7
-        )
-        self.assertEqual(len(candidates), 16)
-        # Verify candidate 0 is primary beam
-        self.assertEqual(candidates[0].sql, self.sample_gold)
-        # Verify logprobs decay with rollout rank
-        self.assertGreater(candidates[0].logprob, candidates[-1].logprob)
-
-    def test_generation_input_schema_contract(self):
+    def test_prompt_uses_schema_and_evidence(self):
         sub_schema = CompactSubSchema(
             db_id="financial_mini",
             selected_tables=["accounts"],
             selected_columns={"accounts": ["account_id", "balance"]},
-            foreign_keys=[]
+            foreign_keys=[],
+            ddl_statements="CREATE TABLE accounts (account_id INT, balance REAL);"
         )
         gen_input = GenerationInput(
             question="Find maximum balance",
             evidence="balance column in accounts",
             sub_schema=sub_schema,
-            num_trajectories=12,
-            temperature=0.6,
-            top_p=0.95,
-            top_k=40
+            num_trajectories=12
         )
-        candidates = self.generator.generate(gen_input, gold_sql="SELECT MAX(balance) FROM accounts;")
+        candidates = self.generator.generate(gen_input)
         self.assertEqual(len(candidates), 12)
-
-    def test_notebook_05_convenience_function(self):
-        rollouts = generate_candidate_rollouts(
-            question="Find accounts",
-            gold_sql="SELECT account_id FROM accounts;",
-            num_candidates=8
-        )
-        self.assertEqual(len(rollouts), 8)
-        self.assertEqual(rollouts[0].candidate_id, 0)
+        prompt = self.tokenizer.prompts[-1]
+        self.assertIn("CREATE TABLE accounts", prompt)
+        self.assertIn("balance column in accounts", prompt)
+        self.assertIn("Find maximum balance", prompt)
+        self.assertEqual(prompt, build_prompt("Find maximum balance", "balance column in accounts",
+                                              "CREATE TABLE accounts (account_id INT, balance REAL);"))
 
     def test_boundary_candidates_count(self):
-        # Clamp minimum to 1
-        c_min = self.generator.generate("Test query", gold_sql="SELECT 1;", num_candidates=0)
-        self.assertGreaterEqual(len(c_min), 1)
-
-        # Large candidate count up to max 32
-        c_large = self.generator.generate("Test query", gold_sql="SELECT 1;", num_candidates=24)
-        self.assertEqual(len(c_large), 24)
+        self.assertEqual(len(self.generator.generate("q", num_candidates=0)), 8)  # 0 -> default
+        self.assertEqual(len(self.generator.generate("q", num_candidates=24)), 24)
+        self.assertEqual(len(self.generator.generate("q", num_candidates=99)), 32)
 
 
 class TestMetricsComputation(unittest.TestCase):
@@ -130,10 +111,10 @@ class TestMetricsComputation(unittest.TestCase):
         rows2 = [(1, "alpha"), (2, "beta")]
         self.assertTrue(compare_sql_results(rows1, rows2))
 
-        # Floating point rounding
-        rows_f1 = [(10.50004,)]
-        rows_f2 = [(10.50001,)]
-        self.assertTrue(compare_sql_results(rows_f1, rows_f2))
+        # BIRD official rule: raw set equality, no float rounding; duplicates ignored
+        self.assertFalse(compare_sql_results([(10.50004,)], [(10.50001,)]))
+        self.assertTrue(compare_sql_results([(1,), (1,)], [(1,)]))
+        self.assertTrue(compare_sql_results([(1,)], [(1.0,)]))
 
         # Distinct mismatch
         rows_diff = [(1, "alpha"), (3, "delta")]
@@ -194,6 +175,7 @@ class TestMetricsComputation(unittest.TestCase):
         self.assertGreater(stats["mean_ms"], 0.0)
         self.assertGreater(stats["p99_ms"], stats["mean_ms"])
 
+    @unittest.skipIf(os.name == "nt", "RAM is measured with the Unix-only resource module")
     def test_memory_footprint(self):
         mem = measure_memory_footprint()
         self.assertIn("ram_mb", mem)
@@ -213,80 +195,66 @@ class TestMetricsComputation(unittest.TestCase):
         self.assertIn("Test Benchmark", table_md)
         self.assertIn("76.50%", table_md)
         self.assertIn("100.00%", table_md)
-        self.assertIn("MARS-SQL 21B", table_md)
-        self.assertIn("Combo C", table_md)
+        # Only measured values: no hard-coded baselines or targets
+        self.assertNotIn("MARS-SQL", table_md)
+        self.assertNotIn("Combo", table_md)
+
+    def test_query_timeout(self):
+        slow = ("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) "
+                "SELECT COUNT(*) FROM c;")
+        ok, err = execute_query_safely(slow, self.db_path, timeout=0.5)
+        self.assertFalse(ok)
+        self.assertIn("interrupt", err.lower())
 
 
 class TestEvaluationHarness(unittest.TestCase):
-    """Tests the full end-to-end evaluation runner on data/mini/mini_bird.jsonl."""
+    """End-to-end harness wiring on data/mini with a stub model that cannot see gold SQL."""
 
     def setUp(self):
         self.dataset_path = "data/mini/mini_bird.jsonl"
         self.db_dir = "data/mini"
 
-    def test_evaluation_harness_execution(self):
-        self.assertTrue(os.path.exists(self.dataset_path), "mini_bird.jsonl must exist")
+    def _harness(self, tmp_dir, tokenizer):
+        return EvaluationHarness(
+            db_dir=self.db_dir,
+            num_candidates=4,
+            output_log_dir=os.path.join(tmp_dir, "logs"),
+            output_report_dir=os.path.join(tmp_dir, "reports"),
+            model=StubModel(),
+            tokenizer=tokenizer
+        )
 
+    def test_harness_runs_without_gold_leak(self):
+        with open(self.dataset_path, encoding="utf-8") as f:
+            golds = [json.loads(line)["SQL"] for line in f if line.strip()][:5]
+        tokenizer = StubTokenizer()
         with tempfile.TemporaryDirectory() as tmp_dir:
-            log_dir = os.path.join(tmp_dir, "logs")
-            rep_dir = os.path.join(tmp_dir, "reports")
-
-            harness = EvaluationHarness(
-                db_dir=self.db_dir,
-                num_candidates=8,
-                temperature=0.7,
-                early_exit_threshold=0.85,
-                output_log_dir=log_dir,
-                output_report_dir=rep_dir
-            )
-
-            # Evaluate subset of 5 queries for fast unit test
-            results = harness.evaluate_dataset(self.dataset_path, limit_samples=5)
+            results = self._harness(tmp_dir, tokenizer).evaluate_dataset(self.dataset_path, limit_samples=5)
 
             self.assertEqual(results["total_queries"], 5)
-            self.assertGreaterEqual(results["execution_accuracy"], 75.0)
-            self.assertEqual(results["valid_sql_rate"], 100.0)
-            self.assertLessEqual(results["ece"], 0.081)
-            self.assertIn("total_abstentions", results)
-            self.assertIn("abstention_rate_pct", results)
-            self.assertEqual(results["total_abstentions"], 0)
+            self.assertEqual(results["scorer_type"], "heuristic")
+            # The stub always answers "SELECT 1;", which matches no gold query.
+            self.assertEqual(results["execution_accuracy"], 0.0)
+            self.assertEqual(len(tokenizer.prompts), 5)
+            for prompt, gold in zip(tokenizer.prompts, golds):
+                self.assertNotIn(gold.strip().rstrip(";"), prompt)
+                self.assertIn("CREATE TABLE", prompt)
 
-            # Check that log and report files were created
-            log_file = os.path.join(log_dir, "evaluation_results.jsonl")
-            report_file = os.path.join(rep_dir, "benchmark_summary.md")
-            self.assertTrue(os.path.exists(log_file))
-            self.assertTrue(os.path.exists(report_file))
-
-            # Verify contents of log file
-            with open(log_file) as f:
+            with open(os.path.join(tmp_dir, "logs", "evaluation_results.jsonl")) as f:
                 logs = [json.loads(line) for line in f]
             self.assertEqual(len(logs), 5)
-            self.assertTrue(logs[0]["predicted_sql"].strip().endswith(";"))
-            self.assertIn("abstained", logs[0])
-            self.assertFalse(logs[0]["abstained"])
+            self.assertEqual(logs[0]["predicted_sql"], "SELECT 1;")
+            self.assertTrue(os.path.exists(os.path.join(tmp_dir, "reports", "benchmark_summary.md")))
 
-    def test_evaluate_end_to_end_functional_api(self):
-        res = evaluate_end_to_end(
-            dataset_path=self.dataset_path,
-            db_dir=self.db_dir,
-            num_candidates=8
-        )
-        self.assertEqual(res["total_queries"], 24)
-        self.assertGreaterEqual(res["execution_accuracy"], 75.0)
-        self.assertEqual(res["valid_sql_rate"], 100.0)
-        self.assertLessEqual(res["ece"], 0.081)
-        self.assertIn("total_abstentions", res)
+    def test_harness_without_model_fails(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            harness = EvaluationHarness(db_dir=self.db_dir, output_log_dir=tmp_dir, output_report_dir=tmp_dir)
+            with self.assertRaises(RuntimeError):
+                harness.evaluate_dataset(self.dataset_path, limit_samples=1)
 
-    def test_evaluation_harness_with_model_path(self):
-        harness = EvaluationHarness(
-            db_dir=self.db_dir,
-            num_candidates=8,
-            model_path="/non/existent/checkpoint/path"
-        )
-        self.assertIsNotNone(harness.candidate_generator)
-        res = harness.evaluate_dataset(self.dataset_path, limit_samples=2)
-        self.assertEqual(res["total_queries"], 2)
-        self.assertGreaterEqual(res["execution_accuracy"], 75.0)
+    def test_bad_model_path_fails(self):
+        with self.assertRaises(Exception):
+            EvaluationHarness(db_dir=self.db_dir, model_path="/non/existent/checkpoint/path")
 
     def test_package_exports_normalize_query_result(self):
         import src.evaluation as ev

@@ -4,7 +4,7 @@ Exports CandidateGenerator, EvaluationHarness, evaluate_end_to_end,
 and benchmark metrics computation functions (EX, VSR, ECE, latency).
 """
 
-from src.evaluation.candidate_generator import CandidateGenerator, generate_candidate_rollouts
+from src.evaluation.candidate_generator import CandidateGenerator, build_prompt
 from src.evaluation.evaluate_end_to_end import EvaluationHarness, evaluate_end_to_end
 from src.evaluation.metrics import (
     compute_execution_accuracy,
@@ -20,7 +20,7 @@ from src.evaluation.metrics import (
 
 __all__ = [
     "CandidateGenerator",
-    "generate_candidate_rollouts",
+    "build_prompt",
     "EvaluationHarness",
     "evaluate_end_to_end",
     "compute_execution_accuracy",

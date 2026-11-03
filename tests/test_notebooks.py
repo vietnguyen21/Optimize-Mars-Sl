@@ -169,8 +169,9 @@ class TestNotebooksIntegrity(unittest.TestCase):
         self.assertEqual(phantom_symbols, [], f"Unresolved imports found in notebooks: {phantom_symbols}")
         self.assertGreater(resolved_count, 15, "Expected at least 15 internal symbols resolved")
 
-    def _execute_notebook(self, nb_name: str):
-        """Executes every code cell of a notebook in an isolated namespace and asserts zero exceptions."""
+    def _execute_notebook(self, nb_name: str, expected_failures=None):
+        """Executes every code cell in an isolated namespace; failures must equal expected_failures
+        (a list of (cell_index, exception_type_name)), default none."""
         nb_path = os.path.join(NOTEBOOKS_DIR, nb_name)
         with open(nb_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -187,8 +188,8 @@ class TestNotebooksIntegrity(unittest.TestCase):
                     failed.append((idx, type(e).__name__, str(e)))
 
         self.assertEqual(
-            failed,
-            [],
+            [(c, t) for c, t, _ in failed],
+            expected_failures or [],
             f"Failures in {nb_name}:\n" + "\n".join(f"  Cell {c}: {t}: {m}" for c, t, m in failed)
         )
 
@@ -209,12 +210,13 @@ class TestNotebooksIntegrity(unittest.TestCase):
         self._execute_notebook("04_system1_laya421m_training.ipynb")
 
     def test_notebook_05_execution(self):
-        """Dynamic execution test for Notebook 05 (End-to-End Evaluation & Benchmark)."""
-        self._execute_notebook("05_end_to_end_evaluation.ipynb")
+        """Notebook 05 must stop with an explicit error when no trained checkpoint exists (no fabricated results)."""
+        self._execute_notebook("05_end_to_end_evaluation.ipynb",
+                               expected_failures=[(3, "RuntimeError"), (4, "NameError")])
 
     def test_all_notebook_cells_execute_cleanly(self):
         """Comprehensive verification that all code cells across all 5 notebooks execute with 0 exceptions."""
-        for nb_name in EXPECTED_NOTEBOOKS:
+        for nb_name in EXPECTED_NOTEBOOKS[:4]:  # 05 needs a trained checkpoint, see test_notebook_05_execution
             self._execute_notebook(nb_name)
 
     def _extract_notebook_text(self, nb_name):

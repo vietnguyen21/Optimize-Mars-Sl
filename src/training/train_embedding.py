@@ -293,9 +293,7 @@ def main():
         print(json.dumps(res, indent=2))
         sys.exit(0)
 
-    logger.info("Executing LitE-SQL HN-SupCon trainer in full mode.")
-    res = run_dry_run(cards_path=args.cards_path, bird_path=args.bird_path, output_dir=args.output_dir)
-    print(json.dumps(res, indent=2))
+    raise NotImplementedError("Full HN-SupCon embedding training is not implemented yet; only --dry_run verification exists.")
 
 
 if __name__ == "__main__":
