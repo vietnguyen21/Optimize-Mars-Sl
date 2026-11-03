@@ -1,0 +1,543 @@
+[
+  {
+    "table_name": "districts",
+    "column_name": "district_id",
+    "data_type": "INTEGER",
+    "constraints": [
+      "PRIMARY KEY"
+    ],
+    "column_description": "Unique identifier district_id for districts",
+    "sample_values": [
+      "1",
+      "2",
+      "3"
+    ]
+  },
+  {
+    "table_name": "districts",
+    "column_name": "district_name",
+    "data_type": "TEXT",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Name or title attribute district_name in districts",
+    "sample_values": [
+      "Prague-Central",
+      "Brno-City",
+      "Ostrava-North"
+    ]
+  },
+  {
+    "table_name": "districts",
+    "column_name": "region",
+    "data_type": "TEXT",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Column region of type TEXT in table districts",
+    "sample_values": [
+      "Bohemia",
+      "Moravia",
+      "Silesia"
+    ]
+  },
+  {
+    "table_name": "districts",
+    "column_name": "population",
+    "data_type": "INTEGER",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Column population of type INTEGER in table districts",
+    "sample_values": [
+      "1200000",
+      "380000",
+      "290000"
+    ]
+  },
+  {
+    "table_name": "clients",
+    "column_name": "client_id",
+    "data_type": "INTEGER",
+    "constraints": [
+      "PRIMARY KEY"
+    ],
+    "column_description": "Unique identifier client_id for clients",
+    "sample_values": [
+      "101",
+      "102",
+      "103"
+    ]
+  },
+  {
+    "table_name": "clients",
+    "column_name": "name",
+    "data_type": "TEXT",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Name or title attribute name in clients",
+    "sample_values": [
+      "Jan Novak",
+      "Marie Dvorakova",
+      "Petr Cech"
+    ]
+  },
+  {
+    "table_name": "clients",
+    "column_name": "gender",
+    "data_type": "TEXT",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Column gender of type TEXT in table clients",
+    "sample_values": [
+      "M",
+      "F"
+    ]
+  },
+  {
+    "table_name": "clients",
+    "column_name": "birth_date",
+    "data_type": "TEXT",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Temporal/date attribute birth_date in clients",
+    "sample_values": [
+      "1975-04-12",
+      "1982-11-23",
+      "1989-07-08"
+    ]
+  },
+  {
+    "table_name": "clients",
+    "column_name": "district_id",
+    "data_type": "INTEGER",
+    "constraints": [
+      "NOT NULL",
+      "FOREIGN KEY REFERENCES districts(district_id)"
+    ],
+    "column_description": "Unique identifier district_id for clients",
+    "sample_values": [
+      "1",
+      "2",
+      "3"
+    ]
+  },
+  {
+    "table_name": "accounts",
+    "column_name": "account_id",
+    "data_type": "INTEGER",
+    "constraints": [
+      "PRIMARY KEY"
+    ],
+    "column_description": "Unique identifier account_id for accounts",
+    "sample_values": [
+      "1001",
+      "1002",
+      "1003"
+    ]
+  },
+  {
+    "table_name": "accounts",
+    "column_name": "client_id",
+    "data_type": "INTEGER",
+    "constraints": [
+      "NOT NULL",
+      "FOREIGN KEY REFERENCES clients(client_id)"
+    ],
+    "column_description": "Unique identifier client_id for accounts",
+    "sample_values": [
+      "101",
+      "102",
+      "103"
+    ]
+  },
+  {
+    "table_name": "accounts",
+    "column_name": "frequency",
+    "data_type": "TEXT",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Column frequency of type TEXT in table accounts",
+    "sample_values": [
+      "monthly",
+      "weekly"
+    ]
+  },
+  {
+    "table_name": "accounts",
+    "column_name": "creation_date",
+    "data_type": "TEXT",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Temporal/date attribute creation_date in accounts",
+    "sample_values": [
+      "2020-01-15",
+      "2019-05-20",
+      "2021-03-10"
+    ]
+  },
+  {
+    "table_name": "cards",
+    "column_name": "card_id",
+    "data_type": "INTEGER",
+    "constraints": [
+      "PRIMARY KEY"
+    ],
+    "column_description": "Unique identifier card_id for cards",
+    "sample_values": [
+      "5001",
+      "5002",
+      "5003"
+    ]
+  },
+  {
+    "table_name": "cards",
+    "column_name": "account_id",
+    "data_type": "INTEGER",
+    "constraints": [
+      "NOT NULL",
+      "FOREIGN KEY REFERENCES accounts(account_id)"
+    ],
+    "column_description": "Unique identifier account_id for cards",
+    "sample_values": [
+      "1001",
+      "1002",
+      "1003"
+    ]
+  },
+  {
+    "table_name": "cards",
+    "column_name": "card_type",
+    "data_type": "TEXT",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Column card_type of type TEXT in table cards",
+    "sample_values": [
+      "classic",
+      "gold",
+      "junior"
+    ]
+  },
+  {
+    "table_name": "cards",
+    "column_name": "issued_date",
+    "data_type": "TEXT",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Temporal/date attribute issued_date in cards",
+    "sample_values": [
+      "2020-02-01",
+      "2019-06-15",
+      "2021-04-01"
+    ]
+  },
+  {
+    "table_name": "transactions",
+    "column_name": "trans_id",
+    "data_type": "INTEGER",
+    "constraints": [
+      "PRIMARY KEY"
+    ],
+    "column_description": "Unique identifier trans_id for transactions",
+    "sample_values": [
+      "8001",
+      "8002",
+      "8003"
+    ]
+  },
+  {
+    "table_name": "transactions",
+    "column_name": "account_id",
+    "data_type": "INTEGER",
+    "constraints": [
+      "NOT NULL",
+      "FOREIGN KEY REFERENCES accounts(account_id)"
+    ],
+    "column_description": "Unique identifier account_id for transactions",
+    "sample_values": [
+      "1001",
+      "1002",
+      "1003"
+    ]
+  },
+  {
+    "table_name": "transactions",
+    "column_name": "trans_date",
+    "data_type": "TEXT",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Temporal/date attribute trans_date in transactions",
+    "sample_values": [
+      "2023-01-05",
+      "2023-01-10",
+      "2023-01-08"
+    ]
+  },
+  {
+    "table_name": "transactions",
+    "column_name": "trans_type",
+    "data_type": "TEXT",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Column trans_type of type TEXT in table transactions",
+    "sample_values": [
+      "credit",
+      "withdrawal"
+    ]
+  },
+  {
+    "table_name": "transactions",
+    "column_name": "amount",
+    "data_type": "REAL",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Numeric measure or metric amount in transactions",
+    "sample_values": [
+      "15000.0",
+      "2500.0",
+      "45000.0"
+    ]
+  },
+  {
+    "table_name": "transactions",
+    "column_name": "balance",
+    "data_type": "REAL",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Numeric measure or metric balance in transactions",
+    "sample_values": [
+      "15000.0",
+      "12500.0",
+      "45000.0"
+    ]
+  },
+  {
+    "table_name": "schools",
+    "column_name": "CDSCode",
+    "data_type": "TEXT",
+    "constraints": [
+      "PRIMARY KEY"
+    ],
+    "column_description": "Unique identifier CDSCode for schools",
+    "sample_values": [
+      "01611760130062",
+      "01611760130070",
+      "01612590131581"
+    ]
+  },
+  {
+    "table_name": "schools",
+    "column_name": "School",
+    "data_type": "TEXT",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Column School of type TEXT in table schools",
+    "sample_values": [
+      "Albany High",
+      "MacGregor High",
+      "Berkeley High"
+    ]
+  },
+  {
+    "table_name": "schools",
+    "column_name": "District",
+    "data_type": "TEXT",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Column District of type TEXT in table schools",
+    "sample_values": [
+      "Albany City Unified",
+      "Berkeley Unified",
+      "Los Angeles Unified"
+    ]
+  },
+  {
+    "table_name": "schools",
+    "column_name": "County",
+    "data_type": "TEXT",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Count/quantity County in schools",
+    "sample_values": [
+      "Alameda",
+      "Los Angeles",
+      "San Francisco"
+    ]
+  },
+  {
+    "table_name": "schools",
+    "column_name": "Charter",
+    "data_type": "INTEGER",
+    "constraints": [
+      "NOT NULL"
+    ],
+    "column_description": "Column Charter of type INTEGER in table schools",
+    "sample_values": [
+      "0",
+      "1"
+    ]
+  },
+  {
+    "table_name": "frpm",
+    "column_name": "CDSCode",
+    "data_type": "TEXT",
+    "constraints": [
+      "PRIMARY KEY",
+      "FOREIGN KEY REFERENCES schools(CDSCode)"
+    ],
+    "column_description": "Unique identifier CDSCode for frpm",
+    "sample_values": [
+      "01611760130062",
+      "01611760130070",
+      "01612590131581"
+    ]
+  },
+  {
+    "table_name": "frpm",
+    "column_name": "Free_Meal_Count",
+    "data_type": "REAL",
+    "constraints": [],
+    "column_description": "Count/quantity Free_Meal_Count in frpm",
+    "sample_values": [
+      "312.0",
+      "45.0",
+      "950.0"
+    ]
+  },
+  {
+    "table_name": "frpm",
+    "column_name": "Percent_Eligible",
+    "data_type": "REAL",
+    "constraints": [],
+    "column_description": "Column Percent_Eligible of type REAL in table frpm",
+    "sample_values": [
+      "24.5",
+      "68.2",
+      "32.1"
+    ]
+  },
+  {
+    "table_name": "frpm",
+    "column_name": "Charter_School_Status",
+    "data_type": "TEXT",
+    "constraints": [],
+    "column_description": "Column Charter_School_Status of type TEXT in table frpm",
+    "sample_values": [
+      "No",
+      "Yes"
+    ]
+  },
+  {
+    "table_name": "satscores",
+    "column_name": "cds",
+    "data_type": "TEXT",
+    "constraints": [
+      "PRIMARY KEY",
+      "FOREIGN KEY REFERENCES schools(CDSCode)"
+    ],
+    "column_description": "Column cds of type TEXT in table satscores",
+    "sample_values": [
+      "01611760130062",
+      "01611760130070",
+      "01612590131581"
+    ]
+  },
+  {
+    "table_name": "satscores",
+    "column_name": "sname",
+    "data_type": "TEXT",
+    "constraints": [],
+    "column_description": "Name or title attribute sname in satscores",
+    "sample_values": [
+      "Albany High",
+      "MacGregor High",
+      "Berkeley High"
+    ]
+  },
+  {
+    "table_name": "satscores",
+    "column_name": "dname",
+    "data_type": "TEXT",
+    "constraints": [],
+    "column_description": "Name or title attribute dname in satscores",
+    "sample_values": [
+      "Albany City Unified",
+      "Berkeley Unified",
+      "Los Angeles Unified"
+    ]
+  },
+  {
+    "table_name": "satscores",
+    "column_name": "NumTstTakr",
+    "data_type": "INTEGER",
+    "constraints": [],
+    "column_description": "Count/quantity NumTstTakr in satscores",
+    "sample_values": [
+      "285",
+      "18",
+      "560"
+    ]
+  },
+  {
+    "table_name": "satscores",
+    "column_name": "AvgScrMath",
+    "data_type": "INTEGER",
+    "constraints": [],
+    "column_description": "Column AvgScrMath of type INTEGER in table satscores",
+    "sample_values": [
+      "625",
+      "410",
+      "590"
+    ]
+  },
+  {
+    "table_name": "satscores",
+    "column_name": "AvgScrRead",
+    "data_type": "INTEGER",
+    "constraints": [],
+    "column_description": "Column AvgScrRead of type INTEGER in table satscores",
+    "sample_values": [
+      "605",
+      "420",
+      "580"
+    ]
+  },
+  {
+    "table_name": "satscores",
+    "column_name": "AvgScrWrit",
+    "data_type": "INTEGER",
+    "constraints": [],
+    "column_description": "Column AvgScrWrit of type INTEGER in table satscores",
+    "sample_values": [
+      "595",
+      "390",
+      "565"
+    ]
+  },
+  {
+    "table_name": "satscores",
+    "column_name": "NumGE1500",
+    "data_type": "INTEGER",
+    "constraints": [],
+    "column_description": "Count/quantity NumGE1500 in satscores",
+    "sample_values": [
+      "210",
+      "2",
+      "340"
+    ]
+  }
+]

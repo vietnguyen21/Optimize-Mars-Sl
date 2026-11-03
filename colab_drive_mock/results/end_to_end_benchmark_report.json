@@ -1,0 +1,12 @@
+{
+  "benchmark_dataset": "mini_bird",
+  "total_queries_evaluated": 24,
+  "execution_accuracy_ex": 100.0,
+  "valid_sql_rate_vsr": 100.0,
+  "average_latency_ms": 10.36253571510315,
+  "num_candidate_rollouts": 8,
+  "xgrammar_pda_enabled": true,
+  "pv_sql_10_rules_verified": true,
+  "system1_early_exit_verified": true,
+  "export_timestamp": "2026-11-02T08:25:47Z"
+}
