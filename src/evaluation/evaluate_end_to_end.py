@@ -35,7 +35,7 @@ from src.validation import (
     AbstentionManager,
     validate_candidate
 )
-from src.evaluation.candidate_generator import CandidateGenerator
+from src.evaluation.candidate_generator import CandidateGenerator, load_generator
 from src.evaluation.metrics import (
     compute_execution_accuracy,
     compute_vsr,
@@ -106,13 +106,8 @@ class EvaluationHarness:
 
         # A load failure must stop the run: there is no fallback generator.
         if model is None and model_path:
-            import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer
             logger.info(f"Loading model checkpoint from {model_path}...")
-            dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
-            tokenizer = AutoTokenizer.from_pretrained(model_path)
-            model = AutoModelForCausalLM.from_pretrained(model_path, dtype=dtype, device_map="auto")
-            model.eval()
+            model, tokenizer = load_generator(model_path)
 
         self.candidate_generator = CandidateGenerator(
             model=model,

@@ -500,6 +500,7 @@ def run_sft_training(
     trainer.save_model(best_dir)
     tokenizer.save_pretrained(best_dir)
     if drive_dir:
+        os.makedirs(drive_dir, exist_ok=True)
         shutil.copytree(best_dir, os.path.join(drive_dir, "best_model"), dirs_exist_ok=True)
     logger.info("Training complete and model saved.")
     return {"train_loss": result.training_loss, "global_step": result.global_step,
