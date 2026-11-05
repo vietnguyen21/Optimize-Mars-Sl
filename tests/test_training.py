@@ -387,6 +387,42 @@ class TestDenseGRPOTrainer(unittest.TestCase):
         self.assertTrue(res["advantage_collapse_prevented"])
 
 
+class TestGRPOTokenLoss(unittest.TestCase):
+    """The GRPO loss must push probability up for positive advantage and down for negative."""
+
+    def setUp(self):
+        from src.training.jepa_module import TORCH_AVAILABLE, torch
+        if not TORCH_AVAILABLE:
+            self.skipTest("needs torch")
+        self.torch = torch
+
+    def _grad(self, advantage):
+        from src.training.train_grpo_generator import grpo_token_loss
+        lp = self.torch.tensor([-1.0, -2.0], requires_grad=True)
+        old = lp.detach().clone()
+        loss = grpo_token_loss(lp, old, old, advantage, self.torch.ones(2))
+        loss.backward()
+        return lp.grad
+
+    def test_gradient_direction_follows_advantage(self):
+        self.assertTrue((self._grad(1.0) < 0).all())  # descent raises logprob
+        self.assertTrue((self._grad(-1.0) > 0).all())
+
+    def test_kl_is_zero_at_reference_and_positive_away(self):
+        from src.training.train_grpo_generator import grpo_token_loss
+        ref = self.torch.tensor([-1.0, -2.0])
+        mask = self.torch.ones(2)
+        self.assertAlmostEqual(float(grpo_token_loss(ref, ref, ref, 0.0, mask, beta_kl=1.0)), 0.0, places=6)
+        moved = ref - 0.5
+        self.assertGreater(float(grpo_token_loss(moved, moved, ref, 0.0, mask, beta_kl=1.0)), 0.0)
+
+    def test_mask_excludes_tokens(self):
+        from src.training.train_grpo_generator import grpo_token_loss
+        lp = self.torch.tensor([-1.0, -1.0])
+        loss = grpo_token_loss(lp, lp, lp, 1.0, self.torch.tensor([1.0, 0.0]))
+        self.assertAlmostEqual(float(loss), -1.0, places=6)
+
+
 class TestLitESQLEmbeddingTrainer(unittest.TestCase):
     """Tests HN-SupCon contrastive loss and margin penalty."""
 

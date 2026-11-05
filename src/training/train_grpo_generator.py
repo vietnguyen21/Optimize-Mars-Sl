@@ -529,22 +529,271 @@ def run_dry_run(
     }
 
 
+def grpo_token_loss(
+    new_logprobs: Any,
+    old_logprobs: Any,
+    ref_logprobs: Any,
+    advantage: float,
+    mask: Any,
+    clip_eps: float = 0.2,
+    beta_kl: float = 0.04
+) -> Any:
+    """Per-token GRPO loss for one completion: clipped surrogate plus KL to the reference policy."""
+    ratio = torch.exp(new_logprobs - old_logprobs)
+    surrogate = torch.min(ratio * advantage, torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * advantage)
+    log_ref_ratio = ref_logprobs - new_logprobs
+    kl = torch.exp(log_ref_ratio) - log_ref_ratio - 1.0
+    per_token = -surrogate + beta_kl * kl
+    return (per_token * mask).sum() / mask.sum().clamp(min=1.0)
+
+
+def completion_logprobs(model: Any, input_ids: Any, prompt_len: int) -> Any:
+    """Log-probability of each completion token; input_ids is one prompt + completion, shape (1, L)."""
+    logits = model(input_ids=input_ids).logits[0, prompt_len - 1:-1]
+    targets = input_ids[0, prompt_len:]
+    return torch.log_softmax(logits.float(), dim=-1).gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+
+
+def sample_group(model: Any, tokenizer: Any, prompt: str, group_size: int, max_prompt_tokens: int,
+                 max_new_tokens: int, temperature: float, top_p: float) -> Tuple[Any, List[Any], List[str]]:
+    """Samples G completions. Returns prompt ids, completion id tensors cut at EOS, decoded texts."""
+    prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"][-max_prompt_tokens:]
+    prompt_tensor = torch.tensor([prompt_ids], device=next(model.parameters()).device)
+    model.eval()
+    with torch.no_grad():
+        sequences = model.generate(
+            input_ids=prompt_tensor,
+            attention_mask=torch.ones_like(prompt_tensor),
+            max_new_tokens=max_new_tokens,
+            num_return_sequences=group_size,
+            do_sample=True,
+            temperature=temperature,
+            top_p=top_p,
+            use_cache=True
+        )
+    eos_ids = model.generation_config.eos_token_id
+    eos_ids = set(eos_ids if isinstance(eos_ids, list) else [eos_ids])
+    completions, texts = [], []
+    for seq in sequences:
+        ids = seq[len(prompt_ids):].tolist()
+        for pos, token in enumerate(ids):
+            if token in eos_ids:
+                ids = ids[:pos + 1]
+                break
+        completions.append(torch.tensor(ids, device=prompt_tensor.device))
+        texts.append("<think>" + tokenizer.decode(ids, skip_special_tokens=True))
+    return prompt_tensor, completions, texts
+
+
+def select_signal_records(
+    model: Any,
+    tokenizer: Any,
+    records: List[Dict[str, Any]],
+    db_dir: str,
+    output_path: str,
+    num_samples: int = 8,
+    max_prompt_tokens: int = 2048,
+    max_new_tokens: int = 256
+) -> List[Dict[str, Any]]:
+    """
+    Keeps questions the model answers correctly only some of the time: all-right and all-wrong
+    groups give almost no learning signal. Appends per question, so it resumes after a disconnect.
+    """
+    from src.evaluation.candidate_generator import build_prompt
+    from src.evaluation.evaluate_end_to_end import load_schema_ddl
+
+    done_path = output_path + ".done"
+    start = int(open(done_path).read()) if os.path.exists(done_path) else 0
+    for idx in range(start, len(records)):
+        item = records[idx]
+        db_path = os.path.join(db_dir, f"{item['db_id']}.sqlite")
+        prompt = build_prompt(item["question"], item.get("evidence", ""), load_schema_ddl(db_path))
+        _, _, texts = sample_group(model, tokenizer, prompt, num_samples, max_prompt_tokens, max_new_tokens, 0.8, 0.95)
+        correct = sum(compute_dense_rewards(t, item["SQL"], "", db_path)["r_exec"] == 2.0 for t in texts)
+        if 0 < correct < num_samples:
+            with open(output_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+        with open(done_path, "w") as f:
+            f.write(str(idx + 1))
+    with open(output_path, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def train_grpo_loop(
+    model: Any,
+    tokenizer: Any,
+    records: List[Dict[str, Any]],
+    db_dir: str,
+    state_dir: str,
+    group_size: int = 4,
+    epochs: int = 1,
+    learning_rate: float = 5e-6,
+    clip_eps: float = 0.2,
+    beta_kl: float = 0.04,
+    max_prompt_tokens: int = 2048,
+    max_new_tokens: int = 256,
+    temperature: float = 0.8,
+    top_p: float = 0.95,
+    max_grad_norm: float = 1.0,
+    save_every: int = 100
+) -> Dict[str, Any]:
+    """
+    One optimizer step per question. `model` is a PeftModel over the frozen SFT policy, so
+    disable_adapter() gives the reference policy for the KL term. Single-turn rollouts.
+    shortcut: no ReAct turns (the upgrade plan allows up to 2); add them after single-turn works.
+    shortcut: rollouts are unconstrained until XGrammar decoding exists; bad SQL scores 0 instead.
+    """
+    from src.evaluation.candidate_generator import build_prompt
+    from src.evaluation.evaluate_end_to_end import load_schema_ddl
+
+    os.makedirs(state_dir, exist_ok=True)
+    device_type = next(model.parameters()).device.type
+    amp_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(params, lr=learning_rate)
+
+    position = 0
+    opt_path = os.path.join(state_dir, "optimizer.pt")
+    pos_path = os.path.join(state_dir, "position.json")
+    if os.path.exists(pos_path):
+        with open(pos_path) as f:
+            position = json.load(f)["position"]
+        optimizer.load_state_dict(torch.load(opt_path, map_location=device_type))
+        logger.info(f"Resuming GRPO at position {position}")
+
+    metrics_path = os.path.join(state_dir, "metrics.jsonl")
+    total = len(records) * epochs
+    skipped = updates = 0
+    reward_sum = 0.0
+
+    def save_state(next_position: int) -> None:
+        model.save_pretrained(os.path.join(state_dir, "adapter"))
+        torch.save(optimizer.state_dict(), opt_path)
+        with open(pos_path, "w") as f:
+            json.dump({"position": next_position}, f)
+
+    for step in range(position, total):
+        item = records[step % len(records)]
+        db_path = os.path.join(db_dir, f"{item['db_id']}.sqlite")
+        prompt = build_prompt(item["question"], item.get("evidence", ""), load_schema_ddl(db_path))
+
+        with torch.autocast(device_type, dtype=amp_dtype):
+            prompt_tensor, completions, texts = sample_group(
+                model, tokenizer, prompt, group_size, max_prompt_tokens, max_new_tokens, temperature, top_p)
+
+        rewards = [compute_dense_rewards(t, item["SQL"], item.get("evidence", ""), db_path) for t in texts]
+        totals = [r["total_reward"] for r in rewards]
+        advantages = normalize_group_advantages(totals)
+        reward_sum += sum(totals) / len(totals)
+        record = {"step": step, "mean_reward": sum(totals) / len(totals),
+                  "exec_correct": sum(r["r_exec"] == 2.0 for r in rewards)}
+
+        if max(totals) - min(totals) < 1e-6:  # identical rewards: zero advantage, nothing to learn
+            skipped += 1
+        else:
+            prompt_len = prompt_tensor.shape[1]
+            model.train()
+            optimizer.zero_grad(set_to_none=True)
+            loss_value = 0.0
+            for completion, advantage in zip(completions, advantages):
+                input_ids = torch.cat([prompt_tensor[0], completion]).unsqueeze(0)
+                with torch.autocast(device_type, dtype=amp_dtype):
+                    with torch.no_grad():
+                        old_lp = completion_logprobs(model, input_ids, prompt_len)
+                        with model.disable_adapter():
+                            ref_lp = completion_logprobs(model, input_ids, prompt_len)
+                    new_lp = completion_logprobs(model, input_ids, prompt_len)
+                    loss = grpo_token_loss(new_lp, old_lp, ref_lp, advantage, torch.ones_like(new_lp),
+                                           clip_eps, beta_kl) / group_size
+                loss.backward()
+                loss_value += loss.item()
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+            if not math.isfinite(loss_value) or not torch.isfinite(grad_norm):
+                raise RuntimeError(f"Non-finite GRPO loss or gradient at step {step}")
+            optimizer.step()
+            updates += 1
+            record.update({"loss": loss_value, "grad_norm": float(grad_norm)})
+
+        with open(metrics_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        if (step + 1) % save_every == 0:
+            save_state(step + 1)
+
+    save_state(total)
+    return {"steps": total - position, "updates": updates, "skipped_no_variance": skipped,
+            "mean_reward": reward_sum / max(1, total - position)}
+
+
 def run_grpo_training(
     data_path: str = "data/mini/mini_bird.jsonl",
     db_dir: str = "data/mini",
     output_dir: Optional[str] = None,
     drive_dir: Optional[str] = None,
     num_rollouts: int = 4,
-    epochs: int = 2,
+    epochs: int = 1,
     learning_rate: float = 5e-6,
     dry_run: bool = True,
+    model_name_or_path: Optional[str] = None,
+    beta_kl: float = 0.04,
+    clip_eps: float = 0.2,
+    lora_rank: int = 64,
+    signal_samples: int = 8,
+    max_new_tokens: int = 256,
+    save_every: int = 100,
     **kwargs: Any
 ) -> Dict[str, Any]:
-    """Runner function executing Dense GRPO training (dry-run or full)."""
-    if not dry_run:
-        raise NotImplementedError("Full GRPO training is not implemented yet; only --dry_run verification exists.")
+    """
+    Dense GRPO after JEPA-SFT. dry_run=True runs the offline verification only.
+    model_name_or_path is the SFT checkpoint. The JEPA loss stays off here. signal_samples=0 trains
+    on every question. State lives in drive_dir (or output_dir), so a rerun resumes. The result
+    is a full merged model in <output_dir>/best_model, loadable by the evaluator.
+    """
     group_size = kwargs.get("group_size", num_rollouts)
-    return run_dry_run(mini_bird_path=data_path, db_dir=db_dir, group_size=group_size)
+    if dry_run:
+        return run_dry_run(mini_bird_path=data_path, db_dir=db_dir, group_size=group_size)
+    if not model_name_or_path or not output_dir:
+        raise ValueError("Full GRPO needs model_name_or_path (SFT checkpoint) and output_dir")
+
+    from peft import PeftModel, get_peft_model
+    from src.evaluation.candidate_generator import load_generator
+    from src.training.train_sft_generator import build_lora_config
+
+    base, tokenizer = load_generator(model_name_or_path)
+    state_dir = drive_dir or output_dir
+    os.makedirs(state_dir, exist_ok=True)
+    with open(data_path, encoding="utf-8") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+
+    if signal_samples:
+        records = select_signal_records(base, tokenizer, records, db_dir,
+                                        os.path.join(state_dir, "signal.jsonl"), signal_samples,
+                                        max_new_tokens=max_new_tokens)
+        logger.info(f"GRPO signal set: {len(records)} questions")
+        if not records:
+            raise RuntimeError("No question has partially correct samples; GRPO has nothing to learn from")
+
+    base.config.use_cache = False
+    base.enable_input_require_grads()
+    base.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    adapter_dir = os.path.join(state_dir, "adapter")
+    if os.path.exists(adapter_dir):
+        model = PeftModel.from_pretrained(base, adapter_dir, is_trainable=True)
+    else:
+        # Fresh LoRA starts as a no-op, so the policy starts equal to the frozen reference.
+        model = get_peft_model(base, build_lora_config(rank=lora_rank, lora_dropout=0.0))
+    model.print_trainable_parameters()
+
+    result = train_grpo_loop(model, tokenizer, records, db_dir, state_dir, group_size=group_size, epochs=epochs,
+                             learning_rate=learning_rate, beta_kl=beta_kl, clip_eps=clip_eps,
+                             max_new_tokens=max_new_tokens, save_every=save_every)
+
+    best_dir = os.path.join(output_dir, "best_model")
+    merged = model.merge_and_unload()
+    merged.config.use_cache = True
+    merged.save_pretrained(best_dir)
+    tokenizer.save_pretrained(best_dir)
+    result["saved_to"] = best_dir
+    return result
 
 
 def parse_args():
@@ -553,10 +802,16 @@ def parse_args():
     parser.add_argument("--data_path", type=str, default="data/mini/mini_bird.jsonl")
     parser.add_argument("--db_dir", type=str, default="data/mini")
     parser.add_argument("--group_size", type=int, default=4, help="Rollouts per question (4, 8, 16)")
-    parser.add_argument("--learning_rate", type=float, default=1e-6)
+    parser.add_argument("--learning_rate", type=float, default=5e-6)
     parser.add_argument("--clip_eps", type=float, default=0.2)
     parser.add_argument("--beta_kl", type=float, default=0.04)
     parser.add_argument("--dry_run", action="store_true", help="Run dry run verification on mini dataset")
+    parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--drive_dir", type=str, default=None, help="Persistent state directory for resume")
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--signal_samples", type=int, default=8, help="0 disables the signal filter")
+    parser.add_argument("--max_new_tokens", type=int, default=256)
+    parser.add_argument("--save_every", type=int, default=100)
     return parser.parse_args()
 
 
@@ -567,7 +822,13 @@ def main():
         print(json.dumps(result, indent=2))
         sys.exit(0)
 
-    raise NotImplementedError("Full GRPO training is not implemented yet; only --dry_run verification exists.")
+    result = run_grpo_training(
+        data_path=args.data_path, db_dir=args.db_dir, output_dir=args.output_dir, drive_dir=args.drive_dir,
+        num_rollouts=args.group_size, epochs=args.epochs, learning_rate=args.learning_rate, dry_run=False,
+        model_name_or_path=args.model_name_or_path, beta_kl=args.beta_kl, clip_eps=args.clip_eps,
+        signal_samples=args.signal_samples, max_new_tokens=args.max_new_tokens, save_every=args.save_every
+    )
+    print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":
