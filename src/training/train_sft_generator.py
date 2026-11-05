@@ -14,6 +14,7 @@ import sys
 import json
 import math
 import random
+import shutil
 import argparse
 import logging
 from typing import Optional, List, Dict, Any, Tuple
@@ -224,13 +225,45 @@ class CompletionOnlyDataCollator:
         self,
         tokenizer: Any = None,
         think_tag: str = "<think>",
-        ignore_index: int = -100
+        ignore_index: int = -100,
+        max_length: int = 2048
     ):
+        self.max_length = max_length
         self.tokenizer = tokenizer
         self.think_tag = think_tag
         self.ignore_index = ignore_index
 
+    def _collate_prompt_completion(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Tokenizes prompt and completion separately, exactly as inference sees them, so the
+        label boundary needs no tag search. EOS stays in labels; long prompts lose their head.
+        """
+        pad_id = self.tokenizer.pad_token_id
+        rows = []
+        for item in batch:
+            prompt_ids = self.tokenizer(item["prompt"], add_special_tokens=False)["input_ids"]
+            completion_ids = self.tokenizer(item["completion"], add_special_tokens=False)["input_ids"]
+            completion_ids = completion_ids[:self.max_length - 1] + [self.tokenizer.eos_token_id]
+            prompt_ids = prompt_ids[-(self.max_length - len(completion_ids)):]
+            rows.append((prompt_ids, completion_ids))
+
+        width = max(len(p) + len(c) for p, c in rows)
+        input_ids, attention_mask, labels = [], [], []
+        for prompt_ids, completion_ids in rows:
+            ids = prompt_ids + completion_ids
+            pad = width - len(ids)
+            input_ids.append(ids + [pad_id] * pad)
+            attention_mask.append([1] * len(ids) + [0] * pad)
+            labels.append([self.ignore_index] * len(prompt_ids) + completion_ids + [self.ignore_index] * pad)
+        return {
+            "input_ids": torch.tensor(input_ids),
+            "attention_mask": torch.tensor(attention_mask),
+            "labels": torch.tensor(labels)
+        }
+
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if TORCH_AVAILABLE and self.tokenizer is not None and "prompt" in batch[0]:
+            return self._collate_prompt_completion(batch)
         if TORCH_AVAILABLE and self.tokenizer is not None:
             # HuggingFace collator logic
             texts = [item["formatted_prompt"] for item in batch]
@@ -361,11 +394,11 @@ def run_dry_run(
     }
 
 
-def load_sft_records(data_path: str, db_dir: Optional[str] = None) -> List[Dict[str, Any]]:
+def load_sft_records(data_path: str, db_dir: Optional[str] = None) -> List[Dict[str, str]]:
     """
-    Loads SFT records with a `formatted_prompt` field (prompt + <think>...</think><answer>SQL</answer>).
-    Records that already carry `formatted_prompt` (SynSQL) are kept; BIRD-style records
-    (question, evidence, SQL, db_id) are formatted with the same prompt the evaluator uses.
+    Loads {prompt, completion} records. The prompt comes from build_prompt, the same function
+    the evaluator uses, so train and inference see one format. Accepts BIRD-style records
+    (question, evidence, SQL, db_id) and SynSQL records (question, schema, think_steps, answer).
     """
     from src.evaluation.candidate_generator import build_prompt
     from src.evaluation.evaluate_end_to_end import load_schema_ddl
@@ -376,14 +409,14 @@ def load_sft_records(data_path: str, db_dir: Optional[str] = None) -> List[Dict[
             if not line.strip():
                 continue
             item = json.loads(line)
-            if not item.get("formatted_prompt"):
-                ddl = item.get("schema", "")
-                if not ddl and db_dir:
-                    ddl = load_schema_ddl(os.path.join(db_dir, f"{item['db_id']}.sqlite"))
-                prompt = build_prompt(item["question"], item.get("evidence", ""), ddl)
-                think = item.get("think_steps", "")
-                item["formatted_prompt"] = f"{prompt}\n{think}\n</think>\n<answer>\n{item['SQL']}\n</answer>"
-            records.append({"formatted_prompt": item["formatted_prompt"]})
+            ddl = item.get("schema", "")
+            if not ddl and db_dir:
+                ddl = load_schema_ddl(os.path.join(db_dir, f"{item['db_id']}.sqlite"))
+            sql = item.get("SQL") or item["answer"]
+            records.append({
+                "prompt": build_prompt(item["question"], item.get("evidence", ""), ddl),
+                "completion": f"\n{item.get('think_steps', '')}\n</think>\n<answer>\n{sql}\n</answer>"
+            })
     if not records:
         raise ValueError(f"No SFT records found in {data_path}")
     return records
@@ -402,6 +435,7 @@ def run_sft_training(
     lora_rank: int = 64,
     lora_alpha: int = 16,
     resume_from_checkpoint: Optional[str] = None,
+    save_steps: int = 500,
     **kwargs: Any
 ) -> Dict[str, Any]:
     """
@@ -422,16 +456,16 @@ def run_sft_training(
         tokenizer.pad_token = tokenizer.eos_token
 
     records = load_sft_records(data_path, db_dir)
-    for r in records:
-        r["formatted_prompt"] += tokenizer.eos_token
 
     use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
-        torch_dtype=torch.bfloat16 if use_bf16 else torch.float16,
+        dtype=torch.bfloat16 if use_bf16 else torch.float16,
         device_map="auto",
         trust_remote_code=True
     )
+    model.config.use_cache = False
+    model.enable_input_require_grads()  # gradient checkpointing with frozen base weights needs this
     model = get_peft_model(model, build_lora_config(rank=lora_rank, alpha=lora_alpha))
     model.print_trainable_parameters()
 
@@ -445,9 +479,9 @@ def run_sft_training(
         per_device_train_batch_size=batch_size,
         num_train_epochs=epochs,
         save_strategy="steps",
-        save_steps=500,
+        save_steps=save_steps,
         logging_steps=50,
-        remove_unused_columns=False,  # collator reads the raw `formatted_prompt` field
+        remove_unused_columns=False,  # collator reads the raw prompt/completion fields
         gradient_checkpointing=True,
         bf16=use_bf16,
         fp16=torch.cuda.is_available() and not use_bf16
@@ -457,6 +491,7 @@ def run_sft_training(
         model=model,
         args=training_args,
         train_dataset=records,
+        processing_class=tokenizer,  # saves the tokenizer inside every checkpoint
         data_collator=CompletionOnlyDataCollator(tokenizer=tokenizer),
         callbacks=callbacks
     )
@@ -464,6 +499,8 @@ def run_sft_training(
     best_dir = os.path.join(output_dir, "best_model")
     trainer.save_model(best_dir)
     tokenizer.save_pretrained(best_dir)
+    if drive_dir:
+        shutil.copytree(best_dir, os.path.join(drive_dir, "best_model"), dirs_exist_ok=True)
     logger.info("Training complete and model saved.")
     return {"train_loss": result.training_loss, "global_step": result.global_step,
             "num_records": len(records), "saved_to": best_dir}

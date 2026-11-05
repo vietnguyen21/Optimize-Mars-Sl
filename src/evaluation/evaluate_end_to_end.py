@@ -105,7 +105,7 @@ class EvaluationHarness:
             logger.info(f"Loading model checkpoint from {model_path}...")
             dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
             tokenizer = AutoTokenizer.from_pretrained(model_path)
-            model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=dtype, device_map="auto")
+            model = AutoModelForCausalLM.from_pretrained(model_path, dtype=dtype, device_map="auto")
             model.eval()
 
         self.candidate_generator = CandidateGenerator(

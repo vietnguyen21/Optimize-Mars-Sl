@@ -232,6 +232,39 @@ def as_latent(values):
 class TestCompletionOnlySFT(unittest.TestCase):
     """Tests completion-only -100 label masking and SFT loss calculation."""
 
+    def test_sft_records_use_evaluator_prompt(self):
+        from src.training.train_sft_generator import load_sft_records
+        records = load_sft_records("data/mini/mini_bird.jsonl", db_dir="data/mini")
+        with open("data/mini/mini_bird.jsonl", encoding="utf-8") as f:
+            first = json.loads(f.readline())
+        self.assertTrue(records[0]["prompt"].endswith("<think>"))
+        self.assertIn("CREATE TABLE", records[0]["prompt"])
+        self.assertIn(first["question"], records[0]["prompt"])
+        self.assertNotIn(first["SQL"], records[0]["prompt"])
+        self.assertIn(first["SQL"], records[0]["completion"])
+        synsql = load_sft_records("data/mini/mini_synsql.jsonl")
+        self.assertTrue(synsql[0]["prompt"].startswith("<schema>"))
+
+    def test_collator_keeps_prompt_out_of_labels_and_eos_in(self):
+        from src.training.jepa_module import TORCH_AVAILABLE
+        if not TORCH_AVAILABLE:
+            self.skipTest("collator tensors need torch")
+
+        class CharTokenizer:
+            pad_token_id = 0  # same id as EOS, the risky case
+            eos_token_id = 0
+
+            def __call__(self, text, add_special_tokens=False):
+                return {"input_ids": [ord(c) for c in text]}
+
+        collator = CompletionOnlyDataCollator(tokenizer=CharTokenizer(), max_length=8)
+        out = collator([{"prompt": "abcdefghij", "completion": "xy"}, {"prompt": "p", "completion": "z"}])
+        self.assertEqual(tuple(out["input_ids"].shape), (2, 8))
+        self.assertEqual(out["labels"][0].tolist()[-3:], [ord("x"), ord("y"), 0])  # EOS kept, prompt head cut
+        self.assertEqual(out["labels"][0].tolist()[:5], [-100] * 5)
+        self.assertEqual(out["labels"][1].tolist(), [-100, ord("z"), 0] + [-100] * 5)
+        self.assertEqual(out["attention_mask"][1].tolist(), [1, 1, 1] + [0] * 5)
+
     def test_mask_prompt_tokens(self):
         THINK_TOKEN = 999
         # Input sequence: prompt tokens [10, 11, 12], completion [999, 20, 21]
