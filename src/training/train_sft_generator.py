@@ -349,7 +349,7 @@ def run_dry_run(
 
     # Verify LoRA configuration creation
     lora_cfg = build_lora_config(rank=512, alpha=16)
-    logger.info(f"[DryRun] ✅ LoRA config verified: rank={getattr(lora_cfg, 'r', lora_cfg.get('r'))}, targets={TARGET_MODULES_DEFAULT}")
+    logger.info(f"[DryRun] ✅ LoRA config verified: rank={lora_cfg.r}, targets={TARGET_MODULES_DEFAULT}")
 
     return {
         "status": "PASSED",

@@ -208,19 +208,28 @@ class TestLLM_JEPAModule(unittest.TestCase):
 
     def test_jepa_module_forward_and_dropout(self):
         jepa = LLM_JEPAModule(hidden_dim=16, lambda_weight=1.0, loss_dropout=0.5)
-        pred_latent = [0.1 * i for i in range(16)]
-        target_latent = [0.2 * i for i in range(16)]
+        pred_latent = as_latent([0.1 * i for i in range(16)])
+        target_latent = as_latent([0.2 * i for i in range(16)])
 
         # Force compute (no dropout)
         res_forced = jepa.forward(pred_latent, target_latent, force_compute=True)
         self.assertEqual(res_forced["dropped"], 0.0)
         self.assertGreater(res_forced["jepa_loss"], 0.0)
-        self.assertAlmostEqual(res_forced["jepa_loss"], res_forced["unscaled_distance"], places=4)
+        self.assertAlmostEqual(float(res_forced["jepa_loss"]), float(res_forced["unscaled_distance"]), places=4)
 
         # Test compute_jepa_loss helper
         loss_val, is_drop = compute_jepa_loss(pred_latent, target_latent, is_training=False)
         self.assertFalse(is_drop)
         self.assertGreater(loss_val, 0.0)
+
+
+def as_latent(values):
+    """The JEPA module takes tensors when torch is installed, plain lists otherwise."""
+    try:
+        import torch
+        return torch.tensor(values)
+    except ImportError:
+        return values
 
 
 class TestCompletionOnlySFT(unittest.TestCase):
@@ -263,9 +272,9 @@ class TestCompletionOnlySFT(unittest.TestCase):
 
     def test_lora_config_generation(self):
         cfg = build_lora_config(rank=256, alpha=16)
-        r = getattr(cfg, "r", cfg.get("r"))
-        alpha = getattr(cfg, "lora_alpha", cfg.get("lora_alpha"))
-        targets = getattr(cfg, "target_modules", cfg.get("target_modules"))
+        r = cfg.r
+        alpha = cfg.lora_alpha
+        targets = cfg.target_modules
 
         self.assertEqual(r, 256)
         self.assertEqual(alpha, 16)
