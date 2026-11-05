@@ -13,13 +13,15 @@ from typing import List, Optional, Tuple, Union, Any
 from src.common.schemas import SQLCandidate, GenerationInput
 
 
-def build_prompt(question: str, evidence: str = "", schema_ddl: str = "") -> str:
-    """Builds the generator prompt from inference-time inputs only (question, evidence, S' DDL)."""
+def build_prompt(question: str, evidence: str = "", schema_ddl: str = "", plan: str = "") -> str:
+    """Builds the generator prompt from inference-time inputs only (question, evidence, S' DDL, plan)."""
     parts = []
     if schema_ddl:
         parts.append(f"<schema>\n{schema_ddl.strip()}\n</schema>")
     if evidence:
         parts.append(f"<evidence>{evidence.strip()}</evidence>")
+    if plan:
+        parts.append(f"<plan>{plan}</plan>")
     parts.append(f"<question>{question.strip()}</question>")
     parts.append("<think>")
     return "\n".join(parts)
@@ -77,7 +79,8 @@ class CandidateGenerator:
         top_p: Optional[float] = None,
         top_k: Optional[int] = None,
         evidence: str = "",
-        schema_ddl: str = ""
+        schema_ddl: str = "",
+        plan: str = ""
     ) -> List[SQLCandidate]:
         """
         Generates K candidate trajectories (K clamped to [1, 32]).
@@ -109,7 +112,7 @@ class CandidateGenerator:
             k_val = top_k or self.default_top_k
 
         k = max(1, min(k, 32))
-        prompt = build_prompt(question, evidence, schema_ddl)
+        prompt = build_prompt(question, evidence, schema_ddl, plan)
         return self._generate_with_model(prompt, k, temp, p, k_val)
 
     def _generate_with_model(

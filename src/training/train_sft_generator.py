@@ -414,7 +414,7 @@ def load_sft_records(data_path: str, db_dir: Optional[str] = None) -> List[Dict[
                 ddl = load_schema_ddl(os.path.join(db_dir, f"{item['db_id']}.sqlite"))
             sql = item.get("SQL") or item["answer"]
             records.append({
-                "prompt": build_prompt(item["question"], item.get("evidence", ""), ddl),
+                "prompt": build_prompt(item["question"], item.get("evidence", ""), ddl, item.get("plan", "")),
                 "completion": f"\n{item.get('think_steps', '')}\n</think>\n<answer>\n{sql}\n</answer>"
             })
     if not records:
@@ -436,6 +436,7 @@ def run_sft_training(
     lora_alpha: int = 16,
     resume_from_checkpoint: Optional[str] = None,
     save_steps: int = 500,
+    seed: int = 42,
     **kwargs: Any
 ) -> Dict[str, Any]:
     """
@@ -480,6 +481,7 @@ def run_sft_training(
         num_train_epochs=epochs,
         save_strategy="steps",
         save_steps=save_steps,
+        seed=seed,
         logging_steps=50,
         remove_unused_columns=False,  # collator reads the raw prompt/completion fields
         gradient_checkpointing=True,

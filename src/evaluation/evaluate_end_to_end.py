@@ -87,7 +87,8 @@ class EvaluationHarness:
         tokenizer: Optional[Any] = None,
         calibration_temperature: float = 1.0,
         rollout_batch_size: int = 2,
-        measure_ves: bool = False
+        measure_ves: bool = False,
+        use_record_plan: bool = False
     ):
         self.db_dir = db_dir
         self.num_candidates = num_candidates
@@ -97,6 +98,7 @@ class EvaluationHarness:
         self.model_path = model_path
         self.rollout_batch_size = rollout_batch_size
         self.measure_ves = measure_ves
+        self.use_record_plan = use_record_plan  # oracle experiments only: the plan comes from gold SQL
 
         os.makedirs(self.output_log_dir, exist_ok=True)
         os.makedirs(self.output_report_dir, exist_ok=True)
@@ -126,7 +128,7 @@ class EvaluationHarness:
         self.security_filter = SecurityFilter()
         self.abstention_manager = AbstentionManager(min_confidence=0.50)
 
-    def _rollouts(self, question: str, evidence: str, schema_ddl: str):
+    def _rollouts(self, question: str, evidence: str, schema_ddl: str, plan: str = ""):
         """Yields candidates in small batches, so an early exit really skips the remaining generation."""
         produced = 0
         while produced < self.num_candidates:
@@ -136,7 +138,8 @@ class EvaluationHarness:
                 num_candidates=batch,
                 temperature=self.temperature,
                 evidence=evidence,
-                schema_ddl=schema_ddl
+                schema_ddl=schema_ddl,
+                plan=plan
             ):
                 cand.candidate_id = produced
                 produced += 1
@@ -206,7 +209,8 @@ class EvaluationHarness:
             # Reset probe session quota for this query
             self.db_probe.reset_counter()
 
-            for cand in self._rollouts(question, item.get("evidence", ""), schema_ddl):
+            plan = item.get("plan", "") if self.use_record_plan else ""
+            for cand in self._rollouts(question, item.get("evidence", ""), schema_ddl, plan):
                 first_candidate = first_candidate or cand
                 # Grammar prefix / syntax check
                 g_ok, _ = self.grammar_engine.validate_or_mask([], cand.sql)
