@@ -293,6 +293,7 @@ def run_dry_run(
 
     return {
         "status": "PASSED",
+        "data_source": "synthetic_dry_run",  # simulated logits: not a measured model result
         "dual_lr": {"backbone": 1e-5, "head": 1e-4},
         "initial_ece": initial_ece,
         "calibrated_ece": calibrated_ece,

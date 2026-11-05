@@ -51,7 +51,7 @@ def print_banner():
 {TermColors.BOLD}{TermColors.HEADER}    TEXT-TO-SQL SLM ARCHITECTURE — COMPREHENSIVE SMOKE TEST & VERIFICATION SUITE{TermColors.RESET}
 {TermColors.BOLD}{TermColors.CYAN}===================================================================================================={TermColors.RESET}
 {TermColors.DIM}Target Environment: CPU / Local Offline Smoke-Test (Zero GPU/Heavy Model Download Dependency){TermColors.RESET}
-{TermColors.DIM}Quality Thresholds: Total Runtime < 60.0s | 100% Test Pass | EX >= 75.0% | VSR = 100.0% | ECE <= 0.081{TermColors.RESET}
+{TermColors.DIM}Checks: 100% Test Pass | pipeline wiring | no gold SQL in prompts (no model quality is measured){TermColors.RESET}
 {TermColors.BOLD}{TermColors.CYAN}----------------------------------------------------------------------------------------------------{TermColors.RESET}
 """
     print(banner)
@@ -149,7 +149,7 @@ def run_suite_6_e2e_benchmark(
         failures = []
         if total_queries != len(golds):
             failures.append(f"Expected {len(golds)} queries evaluated, got {total_queries}")
-        leaked = [g for g, p in zip(golds, tokenizer.prompts) if g.strip().rstrip(";") in p]
+        leaked = [g for g in golds if any(g.strip().rstrip(";") in p for p in tokenizer.prompts)]
         if leaked:
             failures.append(f"Gold SQL leaked into {len(leaked)} generator prompts")
         if failures:
@@ -323,7 +323,7 @@ def main():
     # Final verdict
     if not has_failure:
         print(f"{TermColors.BOLD}{TermColors.GREEN}[VERIFICATION SUCCESSFUL]{TermColors.RESET} "
-              f"All 6 suites passed in {total_elapsed:.3f}s (< 60.0s threshold). System is production-ready.")
+              f"All 6 suites passed in {total_elapsed:.3f}s (< 60.0s threshold). Wiring verified; model quality is not measured here.")
         sys.exit(0)
     else:
         print(f"{TermColors.BOLD}{TermColors.RED}[VERIFICATION FAILED]{TermColors.RESET} One or more test suites failed.")

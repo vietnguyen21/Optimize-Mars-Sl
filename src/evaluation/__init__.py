@@ -15,7 +15,11 @@ from src.evaluation.metrics import (
     format_benchmark_summary,
     compare_sql_results,
     normalize_query_result,
-    execute_query_safely
+    execute_query_safely,
+    compute_ves,
+    bootstrap_paired_ci,
+    mcnemar_exact_p,
+    select_tau_risk_coverage
 )
 
 __all__ = [
@@ -31,5 +35,9 @@ __all__ = [
     "format_benchmark_summary",
     "compare_sql_results",
     "normalize_query_result",
-    "execute_query_safely"
+    "execute_query_safely",
+    "compute_ves",
+    "bootstrap_paired_ci",
+    "mcnemar_exact_p",
+    "select_tau_risk_coverage"
 ]

@@ -114,11 +114,11 @@ class CandidateGenerator:
         )
 
         # Sequence log-probabilities from the sampling scores (sum over generated tokens).
-        try:
+        if hasattr(self.model, "compute_transition_scores"):
             seq_logprobs = self.model.compute_transition_scores(
                 outputs.sequences, outputs.scores, normalize_logits=True
             ).sum(dim=-1).tolist()
-        except Exception:  # some stub/legacy models lack compute_transition_scores
+        else:
             seq_logprobs = [0.0] * len(outputs.sequences)
 
         candidates = []

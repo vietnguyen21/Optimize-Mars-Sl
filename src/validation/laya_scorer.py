@@ -1,7 +1,6 @@
 """
 Laya-421M (ModernBERT) System-1 0-Token Decision Scorer & Adaptive Early-Exit Gate.
-Implements calibrated confidence scoring (~1.2 ms latency, ECE <= 0.081)
-and Adaptive Early-Exit Gate at >= 0.85 confidence.
+Implements confidence scoring and an Adaptive Early-Exit Gate at >= 0.85 confidence.
 """
 
 import math
@@ -108,9 +107,6 @@ class LayaScorer:
 
         # Schema table alignment
         schema_tables = self._extract_schema_tables(schema_ddl)
-        if not schema_tables:
-            # Fallback table extraction from common names
-            schema_tables = ["accounts", "clients", "cards", "districts", "schools", "frpm", "satscores"]
 
         matched_tables = [t for t in schema_tables if re.search(rf"\b{t}\b", sql_lower)]
         coverage = len(matched_tables) / max(1, len(schema_tables))

@@ -11,6 +11,7 @@ Computes:
 
 import math
 import os
+import random
 import sqlite3
 import statistics
 import time
@@ -184,6 +185,89 @@ def compute_ece(
     return round(ece, 4)
 
 
+def compute_ves(
+    predictions: List[str],
+    gold_queries: List[str],
+    db_paths: List[str],
+    iterations: int = 5
+) -> float:
+    """
+    Valid Efficiency Score, BIRD definition: mean over queries of sqrt(gold_time / pred_time) * 100
+    for correct queries, 0 otherwise. Times are means over `iterations` runs; run on a local disk.
+    shortcut: BIRD uses 100 iterations with 3-sigma outlier removal; raise iterations for final numbers.
+    """
+    if not predictions:
+        return 0.0
+
+    def timed(sql: str, db_path: str) -> Tuple[bool, Any, float]:
+        total = 0.0
+        ok, rows = False, None
+        for _ in range(iterations):
+            start = time.perf_counter()
+            ok, rows = execute_query_safely(sql, db_path)
+            total += time.perf_counter() - start
+            if not ok:
+                break
+        return ok, rows, total / iterations
+
+    score = 0.0
+    for pred_sql, gold_sql, db_path in zip(predictions, gold_queries, db_paths):
+        p_ok, p_rows, p_time = timed(pred_sql, db_path)
+        g_ok, g_rows, g_time = timed(gold_sql, db_path)
+        if p_ok and g_ok and compare_sql_results(p_rows, g_rows) and p_time > 0:
+            score += math.sqrt(g_time / p_time) * 100.0
+    return round(score / len(predictions), 2)
+
+
+def bootstrap_paired_ci(
+    correct_a: List[bool],
+    correct_b: List[bool],
+    num_samples: int = 2000,
+    seed: int = 42
+) -> Tuple[float, float, float]:
+    """95% bootstrap CI of EX(a) - EX(b) in points on paired per-query outcomes: (diff, low, high)."""
+    n = len(correct_a)
+    if n == 0 or n != len(correct_b):
+        raise ValueError("correct_a and correct_b must be non-empty and the same length")
+    rng = random.Random(seed)
+    diffs = [int(a) - int(b) for a, b in zip(correct_a, correct_b)]
+    means = sorted(sum(rng.choices(diffs, k=n)) / n * 100.0 for _ in range(num_samples))
+    return sum(diffs) / n * 100.0, means[int(0.025 * num_samples)], means[int(0.975 * num_samples) - 1]
+
+
+def mcnemar_exact_p(correct_a: List[bool], correct_b: List[bool]) -> float:
+    """Two-sided exact McNemar p-value on paired per-query outcomes."""
+    b = sum(1 for x, y in zip(correct_a, correct_b) if x and not y)
+    c = sum(1 for x, y in zip(correct_a, correct_b) if y and not x)
+    n = b + c
+    if n == 0:
+        return 1.0
+    tail = sum(math.comb(n, k) for k in range(min(b, c) + 1)) / 2 ** n
+    return min(1.0, 2.0 * tail)
+
+
+def select_tau_risk_coverage(
+    confidences: List[float],
+    correctness: List[bool],
+    max_risk: float = 0.02
+) -> Tuple[Optional[float], List[Dict[str, float]]]:
+    """
+    Risk-coverage curve on the calibration set. For each threshold tau: coverage is the share of
+    queries with confidence >= tau, risk the error rate among them. Returns the lowest tau with
+    risk <= max_risk (highest coverage), or None if no tau qualifies, plus the curve.
+    """
+    n = len(confidences)
+    curve = []
+    best = None
+    for tau in sorted(set(confidences), reverse=True):
+        kept = [ok for c, ok in zip(confidences, correctness) if c >= tau]
+        risk = 1.0 - sum(1 for ok in kept if ok) / len(kept)
+        curve.append({"tau": tau, "coverage": len(kept) / n, "risk": risk})
+        if risk <= max_risk:
+            best = tau
+    return best, curve
+
+
 def compute_latency_stats(latencies_ms: List[float]) -> Dict[str, float]:
     """
     Computes mean, median, P95, and P99 latency statistics in milliseconds.
@@ -224,10 +308,10 @@ def measure_memory_footprint() -> Dict[str, Any]:
     gpu_vram_mb = 0.0
     try:
         import torch
-        if torch.cuda.is_available():
-            gpu_vram_mb = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
-    except Exception:
-        pass
+    except ImportError:
+        torch = None
+    if torch is not None and torch.cuda.is_available():
+        gpu_vram_mb = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
 
     return {
         "ram_mb": round(ram_mb, 2),
@@ -263,6 +347,8 @@ targets belong in the paper with their sources.
 | **Expected Calibration Error (ECE)** | **{ece:.4f}** |
 | **Average End-to-End Latency** | **{latency_ms:.2f} ms** ({latency_s:.2f}s) |
 | **Peak GPU VRAM** | **{vram:.2f} GB** |
+| **VES** | {metrics.get("ves", "not measured")} |
+| **AST false rejection rate** | {metrics.get("ast_false_rejection_rate", "not measured")} |
 | **System-1 scorer** | {metrics.get("scorer_type", "unknown")} |
 """
     return table.strip()

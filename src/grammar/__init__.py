@@ -30,10 +30,7 @@ def get_grammar_engine(engine_type: str = "auto", schema_ddl: str = "") -> BaseG
         # In auto mode: if xgrammar is available, use XGrammarPDAEngine;
         # otherwise, XGrammarPDAEngine still provides pure-Python PDA stack & bitmask simulation,
         # but RegexASTFallbackEngine is the primary zero-crash fallback engine.
-        try:
-            return XGrammarPDAEngine(schema_ddl=schema_ddl)
-        except Exception:
-            return RegexASTFallbackEngine(schema_ddl=schema_ddl)
+        return XGrammarPDAEngine(schema_ddl=schema_ddl)
     else:
         raise ValueError(f"Unknown grammar engine type: {engine_type}. Expected 'auto', 'xgrammar', or 'fallback'.")
 

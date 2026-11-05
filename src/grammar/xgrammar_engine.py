@@ -217,16 +217,17 @@ class XGrammarPDAEngine(BaseGrammarEngine):
         """
         bitmask = self.generate_bitmask(context)
 
+        # The mask indexes self.vocab; applying it to another vocabulary would hit unrelated tokens.
+        size = logits.shape[-1] if hasattr(logits, "shape") else len(logits)
+        if size != len(bitmask):
+            raise ValueError(f"filter_logits expects {len(bitmask)} logits (self.vocab), got {size}")
+
         # PyTorch Tensor support
         if hasattr(logits, "clone"):
+            import torch
             res = logits.clone()
-            try:
-                import torch
-                mask_tensor = torch.tensor(bitmask[:logits.shape[-1]], dtype=torch.bool, device=logits.device)
-                res[~mask_tensor] = -1e9
-                return res
-            except Exception:
-                pass
+            res[..., ~torch.tensor(bitmask, dtype=torch.bool, device=logits.device)] = -1e9
+            return res
 
         # Python list support
         if isinstance(logits, list):

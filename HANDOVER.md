@@ -8,7 +8,7 @@
 > **Ngày hoàn thành**: 02/11/2026  
 > **Đơn vị bàn giao**: Đội ngũ Kỹ thuật Lập trình Hệ thống (Engineering Squad)  
 > **Đơn vị tiếp nhận**: Đội ngũ Nghiên cứu & Phân tích Dữ liệu Thực nghiệm (Research & Data Science Team)  
-> **Trạng thái nghiệm thu**: **100% Hoàn tất (158/158 Unit Tests Passed | Smoke Test 100% Passed in ~5s)**
+> **Trạng thái**: Khung code đã chạy thử trên Colab T4 (SFT thật trên dữ liệu mini). Chưa có kết quả thực nghiệm trên BIRD/Spider. Mọi số EX, VSR, ECE, latency, VRAM trong tài liệu này là mục tiêu, không phải kết quả đo.
 
 ---
 
@@ -495,7 +495,7 @@ python3 -m unittest discover tests/ -v
 Ran 158 tests in 4.135s
 OK
 ```
-Toàn bộ **158/158 bài kiểm thử** (bao gồm 107 bài kiểm thử chức năng và 51 bài stress test) đều vượt qua 100% không phát sinh bất kỳ lỗi hay cảnh báo nào.
+Toàn bộ bộ kiểm thử (bao gồm 107 bài kiểm thử chức năng và 51 bài stress test) đều vượt qua 100% không phát sinh bất kỳ lỗi hay cảnh báo nào.
 
 ---
 
@@ -551,7 +551,6 @@ Dưới đây là bảng đối sánh khoa học toàn diện giữa hệ thốn
 | **Combo A (Ultra-Light SLM)** | 1.5B | 69.5% – 72.0% | 100.0% | $\sim 3.8\text{ s}$ | $< 8.0\text{ GB RAM}$ | Rất thấp (Chạy được trên CPU / T4) | 100% (Nhờ Cây Steiner) |
 | **Combo C (Pareto SOTA 3B)** | 3.0B | 75.0% – 76.8% | 100.0% | $\sim 5.2\text{ s}$ | 8.0 – 16.0 GB | Thấp ($1 \times \text{T4}$ hoặc L4) | 100% (Nhờ Cây Steiner) |
 | **Combo D (High-End SOTA 7B)** | 7.0B | 77.5% – 79.2% | 100.0% | $\sim 5.8\text{ s}$ | 14.0 – 24.0 GB | Trung bình ($1 \times \text{L4}$ hoặc A10G) | 100% (Nhờ Cây Steiner) |
-| **Pipeline Nghiệm thu Hiện tại** | **SLM (3B/7B)** | **100.00%** *(mini)* | **100.00%** | **0.02 s** *(smoke)* | **0.00 GB** *(CPU)* | **Tối ưu hóa tối đa** | **100.00% (48/48 ca BIRD)** |
 
 ---
 
@@ -627,7 +626,7 @@ Hiện tại, mã nguồn đã được nghiệm thu hoàn chỉnh trên bộ d�
 
 Hệ thống mã nguồn Text-to-SQL SLM được bàn giao tại kho lưu trữ này đã trải qua **6 giai đoạn phát triển và kiểm định độc lập gắt gao** từ Milestone M1 đến M5. Toàn bộ mã nguồn:
 1. Đạt chuẩn kiến trúc sạch, có chú thích đầy đủ, tuân thủ nguyên tắc thiết kế đơn nhiệm và hợp đồng dữ liệu chuẩn hóa Pydantic.
-2. Đáp ứng 100% các tiêu chuẩn kiểm thử tự động (158 unit tests passed, smoke test passed dưới 6 giây).
+2. Bộ kiểm thử tự động và smoke test chỉ kiểm tra hệ thống dây dẫn, không đo chất lượng mô hình.
 3. Sẵn sàng 100% để đội ngũ nghiên cứu và phân tích số liệu vận hành độc lập trên cả môi trường CPU nội bộ lẫn Google Colab GPU.
 
 *Mọi thắc mắc kỹ thuật hoặc yêu cầu hỗ trợ chuyên sâu trong quá trình thực nghiệm, xin vui lòng đối chiếu chi tiết tại `PROJECT.md`, `AGENTS_RESEARCH.md` hoặc các bài kiểm thử tương ứng trong thư mục `tests/`.*

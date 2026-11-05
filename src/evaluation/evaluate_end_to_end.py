@@ -44,7 +44,8 @@ from src.evaluation.metrics import (
     measure_memory_footprint,
     format_benchmark_summary,
     execute_query_safely,
-    compare_sql_results
+    compare_sql_results,
+    compute_ves
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -83,7 +84,10 @@ class EvaluationHarness:
         model_path: Optional[str] = None,
         scorer_model_path: Optional[str] = None,
         model: Optional[Any] = None,
-        tokenizer: Optional[Any] = None
+        tokenizer: Optional[Any] = None,
+        calibration_temperature: float = 1.0,
+        rollout_batch_size: int = 2,
+        measure_ves: bool = False
     ):
         self.db_dir = db_dir
         self.num_candidates = num_candidates
@@ -91,6 +95,8 @@ class EvaluationHarness:
         self.output_log_dir = output_log_dir
         self.output_report_dir = output_report_dir
         self.model_path = model_path
+        self.rollout_batch_size = rollout_batch_size
+        self.measure_ves = measure_ves
 
         os.makedirs(self.output_log_dir, exist_ok=True)
         os.makedirs(self.output_report_dir, exist_ok=True)
@@ -119,10 +125,27 @@ class EvaluationHarness:
         self.scorer = LayaScorer(
             model_path=scorer_model_path,
             threshold=decision_threshold,
-            early_exit_threshold=early_exit_threshold
+            early_exit_threshold=early_exit_threshold,
+            calibration_temperature=calibration_temperature
         )
         self.security_filter = SecurityFilter()
         self.abstention_manager = AbstentionManager(min_confidence=0.50)
+
+    def _rollouts(self, question: str, evidence: str, schema_ddl: str):
+        """Yields candidates in small batches, so an early exit really skips the remaining generation."""
+        produced = 0
+        while produced < self.num_candidates:
+            batch = min(self.rollout_batch_size, self.num_candidates - produced)
+            for cand in self.candidate_generator.generate(
+                prompt_or_input=question,
+                num_candidates=batch,
+                temperature=self.temperature,
+                evidence=evidence,
+                schema_ddl=schema_ddl
+            ):
+                cand.candidate_id = produced
+                produced += 1
+                yield cand
 
     def evaluate_dataset(
         self,
@@ -154,6 +177,14 @@ class EvaluationHarness:
         latencies_ms = []
         detailed_logs = []
 
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+        except ImportError:
+            pass
+
+        ast_rejected = []
         total_early_exits = 0
         total_abstentions = 0
 
@@ -164,14 +195,9 @@ class EvaluationHarness:
             db_id = item.get("db_id", "")
             db_file = os.path.join(self.db_dir, f"{db_id}.sqlite")
 
-            # 1. Candidate rollouts (8 to 16 rollouts). Gold SQL is used only for scoring below.
-            candidates = self.candidate_generator.generate(
-                prompt_or_input=question,
-                num_candidates=self.num_candidates,
-                temperature=self.temperature,
-                evidence=item.get("evidence", ""),
-                schema_ddl=load_schema_ddl(db_file)
-            )
+            # 1. Candidate rollouts (lazy). Gold SQL is used only for scoring below.
+            schema_ddl = load_schema_ddl(db_file)
+            first_candidate = None
 
             # 2. Candidate Selection via Grammar PDA + PV-SQL + DB Probe + System-1 Gate
             best_candidate = None
@@ -185,7 +211,8 @@ class EvaluationHarness:
             # Reset probe session quota for this query
             self.db_probe.reset_counter()
 
-            for cand in candidates:
+            for cand in self._rollouts(question, item.get("evidence", ""), schema_ddl):
+                first_candidate = first_candidate or cand
                 # Grammar prefix / syntax check
                 g_ok, _ = self.grammar_engine.validate_or_mask([], cand.sql)
                 if not g_ok:
@@ -196,6 +223,7 @@ class EvaluationHarness:
                     candidate=cand,
                     question=question,
                     db_path=db_file,
+                    schema_ddl=schema_ddl,
                     validator=self.pv_validator,
                     probe_engine=self.db_probe,
                     scorer=self.scorer,
@@ -204,6 +232,8 @@ class EvaluationHarness:
 
                 if not val_res.security_safe:
                     has_security_violation = True
+                if val_res.probe_passed and not val_res.pv_sql_passed:
+                    ast_rejected.append((cand.sql, gold_sql, db_file))
 
                 if val_res.final_verdict == "ACCEPT":
                     valid_candidates_count += 1
@@ -239,8 +269,8 @@ class EvaluationHarness:
 
             # Fallback if no candidate achieved ACCEPT
             if best_candidate is None:
-                best_candidate = candidates[0]
-                best_score = self.scorer.score_candidate(question, "", best_candidate.sql)
+                best_candidate = first_candidate
+                best_score = self.scorer.score_candidate(question, schema_ddl, best_candidate.sql)
 
             elapsed_ms = (time.perf_counter() - q_start) * 1000.0
             latencies_ms.append(elapsed_ms)
@@ -270,6 +300,11 @@ class EvaluationHarness:
         ece = compute_ece(confidences, matches, num_bins=10)
         latency_stats = compute_latency_stats(latencies_ms)
         mem_stats = measure_memory_footprint()
+        # Share of AST-rejected, runnable candidates that were actually correct.
+        ast_false = 0
+        if ast_rejected:
+            rej_sql, rej_gold, rej_db = map(list, zip(*ast_rejected))
+            ast_false = sum(compute_execution_accuracy(rej_sql, rej_gold, rej_db)[1])
 
         benchmark_results = {
             "dataset": os.path.basename(dataset_path),
@@ -280,11 +315,16 @@ class EvaluationHarness:
             "ece": ece,
             "latency": latency_stats,
             "memory": mem_stats,
+            "ast_rejected_candidates": len(ast_rejected),
+            "ast_false_rejection_rate": round(ast_false / len(ast_rejected), 4) if ast_rejected else None,
             "early_exit_count": total_early_exits,
             "early_exit_rate_pct": round((total_early_exits / max(1, len(records))) * 100.0, 2),
             "total_abstentions": total_abstentions,
             "abstention_rate_pct": round((total_abstentions / max(1, len(records))) * 100.0, 2)
         }
+
+        if self.measure_ves:
+            benchmark_results["ves"] = compute_ves(predictions, gold_queries, db_paths)
 
         # 4. Save detailed results log
         log_file = os.path.join(self.output_log_dir, "evaluation_results.jsonl")

@@ -18,6 +18,10 @@ from src.evaluation import (
     normalize_query_result
 )
 from src.evaluation.metrics import (
+    bootstrap_paired_ci,
+    compute_ves,
+    mcnemar_exact_p,
+    select_tau_risk_coverage,
     compute_execution_accuracy,
     compute_vsr,
     compute_ece,
@@ -207,6 +211,34 @@ class TestMetricsComputation(unittest.TestCase):
         self.assertIn("interrupt", err.lower())
 
 
+class TestStatistics(unittest.TestCase):
+    """VES, paired significance tests and tau selection."""
+
+    def test_mcnemar_and_bootstrap(self):
+        a = [True] * 10 + [False] * 10
+        self.assertEqual(mcnemar_exact_p(a, a), 1.0)
+        b = [False] * 10 + [False] * 10
+        self.assertAlmostEqual(mcnemar_exact_p(a, b), 2 / 1024)
+        diff, low, high = bootstrap_paired_ci(a, b)
+        self.assertEqual(diff, 50.0)
+        self.assertGreater(low, 0.0)
+        self.assertGreaterEqual(high, diff)
+
+    def test_tau_selection(self):
+        conf = [0.9, 0.8, 0.7, 0.6]
+        ok = [True, True, True, False]
+        tau, curve = select_tau_risk_coverage(conf, ok, max_risk=0.0)
+        self.assertEqual(tau, 0.7)
+        self.assertEqual(curve[-1]["coverage"], 1.0)
+        self.assertEqual(select_tau_risk_coverage([0.5], [False], max_risk=0.0)[0], None)
+
+    def test_ves_rewards_only_correct_queries(self):
+        db = "data/mini/financial_mini.sqlite"
+        same = "SELECT COUNT(*) FROM clients;"
+        self.assertGreater(compute_ves([same], [same], [db]), 0.0)
+        self.assertEqual(compute_ves(["SELECT 1;"], [same], [db]), 0.0)
+
+
 class TestEvaluationHarness(unittest.TestCase):
     """End-to-end harness wiring on data/mini with a stub model that cannot see gold SQL."""
 
@@ -235,10 +267,11 @@ class TestEvaluationHarness(unittest.TestCase):
             self.assertEqual(results["scorer_type"], "heuristic")
             # The stub always answers "SELECT 1;", which matches no gold query.
             self.assertEqual(results["execution_accuracy"], 0.0)
-            self.assertEqual(len(tokenizer.prompts), 5)
-            for prompt, gold in zip(tokenizer.prompts, golds):
-                self.assertNotIn(gold.strip().rstrip(";"), prompt)
+            self.assertGreaterEqual(len(tokenizer.prompts), 5)
+            for prompt in tokenizer.prompts:
                 self.assertIn("CREATE TABLE", prompt)
+                for gold in golds:
+                    self.assertNotIn(gold.strip().rstrip(";"), prompt)
 
             with open(os.path.join(tmp_dir, "logs", "evaluation_results.jsonl")) as f:
                 logs = [json.loads(line) for line in f]
