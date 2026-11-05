@@ -209,7 +209,7 @@ class TestLLM_JEPAModule(unittest.TestCase):
     def test_jepa_module_forward_and_dropout(self):
         jepa = LLM_JEPAModule(hidden_dim=16, lambda_weight=1.0, loss_dropout=0.5)
         pred_latent = as_latent([0.1 * i for i in range(16)])
-        target_latent = as_latent([0.2 * i for i in range(16)])
+        target_latent = as_latent([0.2 * (16 - i) for i in range(16)])  # not parallel to pred_latent
 
         # Force compute (no dropout)
         res_forced = jepa.forward(pred_latent, target_latent, force_compute=True)

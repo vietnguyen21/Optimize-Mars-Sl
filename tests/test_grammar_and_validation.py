@@ -130,7 +130,8 @@ class TestGrammarEngines(unittest.TestCase):
         bad_op = "SELECT account_id FROM accounts WHERE district_id >"
         ok, err = engine.validate_sql_syntax(bad_op)
         self.assertFalse(ok)
-        self.assertIn("dangling", err.lower())
+        # Message differs: fallback rule vs sqlglot parser when sqlglot is installed
+        self.assertTrue("dangling" in err.lower() or "sqlglot" in err.lower(), err)
 
     def test_fallback_engine_prefix_validation(self):
         engine = RegexASTFallbackEngine()
