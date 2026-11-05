@@ -247,6 +247,7 @@ class TestCompletionOnlySFT(unittest.TestCase):
 
     def test_collator_keeps_prompt_out_of_labels_and_eos_in(self):
         from src.training.jepa_module import TORCH_AVAILABLE
+        from src.training.train_sft_generator import CompletionOnlyDataCollator
         if not TORCH_AVAILABLE:
             self.skipTest("collator tensors need torch")
 
