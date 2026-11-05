@@ -298,10 +298,10 @@ class TestLLMJEPAStress(unittest.TestCase):
         p ~ 0.5 across multiple random seeds, and reproduces sequence per seed.
         """
         jepa = LLM_JEPAModule(hidden_dim=8, lambda_weight=1.0, loss_dropout=0.5)
-        try:
-            import torch
+        from src.training.jepa_module import TORCH_AVAILABLE, torch
+        if TORCH_AVAILABLE:
             pred, target = torch.ones(8), torch.full((8,), 2.0)
-        except ImportError:
+        else:
             pred, target = [1.0] * 8, [2.0] * 8
 
         seeds = [42, 101, 777, 2026, 99999]

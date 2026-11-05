@@ -225,11 +225,8 @@ class TestLLM_JEPAModule(unittest.TestCase):
 
 def as_latent(values):
     """The JEPA module takes tensors when torch is installed, plain lists otherwise."""
-    try:
-        import torch
-        return torch.tensor(values)
-    except ImportError:
-        return values
+    from src.training.jepa_module import TORCH_AVAILABLE, torch
+    return torch.tensor(values) if TORCH_AVAILABLE else values
 
 
 class TestCompletionOnlySFT(unittest.TestCase):
