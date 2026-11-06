@@ -1,8 +1,4 @@
-"""
-Multi-Candidate SQL Trajectory Generator for Ablation Studies.
-Samples 8 to 16 candidate rollouts per natural language query using configurable
-temperature (0.7), top_p (0.9), and top_k (50) sampling parameters.
-"""
+"""Checkpoint-sampled SQL candidates with explicit, non-benchmark fixture mode."""
 
 import math
 import random
@@ -14,10 +10,8 @@ from src.common.schemas import SQLCandidate, GenerationInput, CompactSubSchema
 class CandidateGenerator:
     """
     Candidate trajectory generator supporting 8 to 16 rollouts per prompt.
-    Supports:
-    1. Checkpoint sampling (via HuggingFace model.generate if model is provided).
-    2. High-fidelity ablation trajectory simulation with reasoning steps (<think>...</think>)
-       and diverse structural variations (beam ranking, aliases, predicate ordering, projection variations).
+    Real mode samples a loaded checkpoint and propagates failures.
+    Explicit dry_run mode preserves legacy fixtures for offline plumbing tests.
     """
 
     def __init__(
@@ -27,8 +21,18 @@ class CandidateGenerator:
         default_num_candidates: int = 8,
         default_temperature: float = 0.7,
         default_top_p: float = 0.9,
-        default_top_k: int = 50
+        default_top_k: int = 50,
+        dry_run: bool = False,
+        max_new_tokens: int = 256,
+        max_prompt_length: int = 1024,
+        constraint_mode: str = "posthoc",
     ):
+        self.dry_run = dry_run
+        self.max_new_tokens = max_new_tokens
+        self.max_prompt_length = max_prompt_length
+        self.constraint_mode = constraint_mode
+        if constraint_mode not in {"posthoc", "xgrammar"}:
+            raise ValueError("constraint_mode must be posthoc or xgrammar")
         self.model = model
         self.tokenizer = tokenizer
         self.default_num_candidates = default_num_candidates
@@ -50,7 +54,7 @@ class CandidateGenerator:
         
         Args:
             prompt_or_input: GenerationInput instance or natural language question string.
-            gold_sql: Optional gold SQL reference query (used for ablation baseline).
+            gold_sql: Legacy fixture reference, allowed only with explicit dry_run=True.
             num_candidates: Number of trajectories to sample (default 8, supports up to 16+).
             temperature: Sampling temperature (default 0.7).
             top_p: Nucleus sampling probability cutoff (default 0.9).
@@ -59,6 +63,8 @@ class CandidateGenerator:
         Returns:
             List of SQLCandidate objects.
         """
+        if gold_sql is not None and not self.dry_run:
+            raise ValueError("Gold SQL is forbidden during real candidate generation")
         if isinstance(prompt_or_input, GenerationInput):
             question = prompt_or_input.question
             k = num_candidates or prompt_or_input.num_trajectories
@@ -81,7 +87,8 @@ class CandidateGenerator:
         if self.model is not None and self.tokenizer is not None:
             return self._generate_with_model(question, k, temp, p, k_val, sub_schema)
 
-        # Otherwise, run the ablation trajectory generator
+        if not self.dry_run:
+            raise RuntimeError("Real generation requires a loaded model and tokenizer; use dry_run=True only for fixtures")
         return self._generate_ablation_trajectories(question, gold_sql, k, temp)
 
     def _generate_with_model(
@@ -93,46 +100,50 @@ class CandidateGenerator:
         top_k: int,
         sub_schema: Optional[CompactSubSchema]
     ) -> List[SQLCandidate]:
-        """Runs autoregressive sampling using loaded PyTorch model."""
-        try:
-            import torch
-            prompt = f"<question>{question}</question>\n<think>"
-            inputs = self.tokenizer(prompt, return_tensors="pt")
-            if hasattr(self.model, "device"):
-                inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
-
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=256,
-                num_return_sequences=num_candidates,
-                do_sample=True,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-                output_scores=True,
-                return_dict_in_generate=True
-            )
-
-            candidates = []
-            for idx, seq in enumerate(outputs.sequences):
-                text = self.tokenizer.decode(seq, skip_special_tokens=True)
-                # Parse <think> and <answer>
-                reasoning = ""
-                sql = text
-                if "<think>" in text and "</think>" in text:
-                    reasoning = text.split("<think>")[1].split("</think>")[0].strip()
-                if "<answer>" in text and "</answer>" in text:
-                    sql = text.split("<answer>")[1].split("</answer>")[0].strip()
-
-                candidates.append(SQLCandidate(
-                    candidate_id=idx,
-                    sql=sql,
-                    reasoning=reasoning,
-                    logprob=-0.1 * (idx + 1)
-                ))
-            return candidates
-        except Exception:
-            return self._generate_ablation_trajectories(question, None, num_candidates, temperature)
+        """Sample serially to keep K independent rollouts within one T4's memory."""
+        import torch
+        from src.training.runtime import build_prompt
+        schema = sub_schema.ddl_statements if sub_schema else ""
+        prompt = build_prompt(question, schema)
+        inputs = self.tokenizer(prompt, return_tensors="pt", add_special_tokens=True)
+        if inputs["input_ids"].shape[1] > self.max_prompt_length:
+            raise ValueError("Grounded prompt exceeds max_prompt_length; reduce retrieval top_k or increase the explicit budget")
+        inputs = {key: value.to(self.model.device) for key, value in inputs.items()}
+        prompt_length = inputs["input_ids"].shape[1]
+        self.model.eval()
+        candidates = []
+        for idx in range(num_candidates):
+            generation_args = {}
+            if self.constraint_mode == "xgrammar":
+                from src.grammar.xgrammar_engine import make_hf_sql_processor
+                generation_args["logits_processor"] = [make_hf_sql_processor(
+                    self.tokenizer, self.model.config.vocab_size, schema
+                )]
+            with torch.inference_mode():
+                outputs = self.model.generate(
+                    **inputs, max_new_tokens=self.max_new_tokens,
+                    num_return_sequences=1, do_sample=True,
+                    temperature=temperature, top_p=top_p, top_k=top_k,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    output_scores=True, return_dict_in_generate=True,
+                    **generation_args,
+                )
+                generated = outputs.sequences[0, prompt_length:]
+                text = self.tokenizer.decode(generated, skip_special_tokens=True)
+                transitions = self.model.compute_transition_scores(
+                    outputs.sequences, outputs.scores, normalize_logits=True
+                )[0]
+                # Mean sampled-token log probability, not a rank-derived constant.
+                logprob = float(transitions.mean().item()) if transitions.numel() else 0.0
+            reasoning_match = re.search(r"<think>(.*?)</think>", text, re.S)
+            answer_match = re.search(r"<answer>(.*?)</answer>", text, re.S)
+            reasoning = reasoning_match.group(1).strip() if reasoning_match else ""
+            sql = answer_match.group(1).strip() if answer_match else ""
+            candidates.append(SQLCandidate(candidate_id=idx, sql=sql,
+                                           reasoning=reasoning, logprob=logprob))
+            del outputs, generated, transitions
+        return candidates
 
     def _generate_ablation_trajectories(
         self,
@@ -245,8 +256,8 @@ def generate_candidate_rollouts(
     num_candidates: int = 8
 ) -> List[SQLCandidate]:
     """
-    Standard generation function supporting 8 to 16 rollouts per query.
-    Maintains compatibility with Notebook 05.
+    Legacy fixture helper for offline tests only; never use for evaluation.
+    Real evaluation calls CandidateGenerator.generate without gold SQL.
     """
-    generator = CandidateGenerator(default_num_candidates=num_candidates)
+    generator = CandidateGenerator(default_num_candidates=num_candidates, dry_run=True)
     return generator.generate(question, gold_sql=gold_sql, num_candidates=num_candidates)

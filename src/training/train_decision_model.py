@@ -7,7 +7,7 @@ Implements:
      - Classification Head: lr = 1e-4, weight_decay = 0.01
   2. RLCD (Reinforcement Learning for Calibrated Decisions) Loss:
      L_RLCD = L_BCE(p, y) + alpha_cal * (p - y)^2 (penalizes overconfident incorrect decisions)
-  3. Temperature Scaling Probability Calibration achieving ECE <= 0.081.
+  3. Held-out NLL temperature scaling and independently measured test ECE.
   4. Dual execution: Full HuggingFace/PyTorch mode and standalone --dry_run mode on data/mini/.
 """
 
@@ -111,6 +111,9 @@ def compute_rlcd_loss(
       L_RLCD = L_BCE + alpha_cal * L_CAL
     Supports both scalar calls (prob=..., label=...) and list calls (probabilities=[...], labels=[...]).
     """
+    if TORCH_AVAILABLE and isinstance(probabilities, torch.Tensor):
+        targets = torch.as_tensor(labels, device=probabilities.device, dtype=probabilities.dtype)
+        return F.binary_cross_entropy(probabilities.clamp(eps, 1-eps), targets) + alpha_cal * ((probabilities-targets)**2).mean()
     if prob is not None and probabilities is None:
         probs_list = [float(prob)]
     elif isinstance(probabilities, (int, float)):
@@ -214,27 +217,22 @@ def fit_temperature(
     target_ece: float = 0.081
 ) -> Tuple[float, float]:
     """
-    Finds optimal temperature T to minimize ECE below target_ece.
-    Uses grid search over temperature values [0.1 .. 5.0].
+    Fit positive temperature by held-out binary negative log likelihood.
+    target_ece is a reporting target, never a promised calibration outcome.
     
     Returns:
         Tuple of (optimal_temperature, resulting_ece)
     """
-    best_t = 1.0
-    best_ece = 1.0
+    if not logits or len(logits) != len(labels):
+        raise ValueError("Calibration requires nonempty, aligned logits and labels")
+    # Fit held-out negative log likelihood, not ECE or a desired benchmark target.
+    temps = [math.exp(-3.0 + i * 6.0 / 240) for i in range(241)]
+    def nll(t):
+        return sum(max(z/t, 0) - (z/t)*y + math.log1p(math.exp(-abs(z/t)))
+                   for z,y in zip(logits, labels)) / len(logits)
+    best_t = min(temps, key=nll)
+    return best_t, compute_ece(calibrate_probabilities(logits, best_t), labels)
 
-    # Grid search for temperature parameter
-    temps = [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5, 1.8, 2.0, 2.5, 3.0]
-    for t in temps:
-        probs = calibrate_probabilities(logits, temperature=t)
-        ece = compute_ece(probs, labels)
-        if ece < best_ece:
-            best_ece = ece
-            best_t = t
-            if best_ece <= target_ece:
-                break
-
-    return best_t, best_ece
 
 
 # ---------------------------------------------------------------------------
@@ -315,14 +313,17 @@ def run_decision_model_training(
     **kwargs: Any
 ) -> Dict[str, Any]:
     """Runner function executing System-1 decision model training (dry-run or full)."""
-    res = run_dry_run(num_samples=100, target_ece_threshold=target_ece)
-    target_export = export_dir or drive_dir or output_dir
-    if target_export:
-        os.makedirs(target_export, exist_ok=True)
-        meta_file = os.path.join(target_export, "calibration_meta.json")
-        with open(meta_file, "w", encoding="utf-8") as f:
-            json.dump(res, f, indent=2)
-    return res
+    if dry_run:
+        res = dict(run_dry_run(num_samples=100, target_ece_threshold=target_ece), mode='smoke', trained=False)
+        target_export = export_dir or output_dir
+        if target_export:
+            os.makedirs(target_export, exist_ok=True)
+            with open(os.path.join(target_export, 'smoke_calibration_meta.json'), 'w') as f:
+                json.dump(res, f, indent=2)
+        return res
+    return _train_decision(data_path=data_path, output_dir=output_dir, export_dir=export_dir,
+                           epochs=epochs, lr_backbone=lr_backbone, lr_head=lr_head,
+                           target_ece=target_ece, **kwargs)
 
 
 def parse_args():
@@ -332,6 +333,11 @@ def parse_args():
     parser.add_argument("--lr_head", type=float, default=1e-4)
     parser.add_argument("--alpha_cal", type=float, default=0.5)
     parser.add_argument("--dry_run", action="store_true")
+    parser.add_argument("--data_path")
+    parser.add_argument("--output_dir", default="outputs/system1")
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--max_steps", type=int, default=100)
+    parser.add_argument("--resume_from_checkpoint")
     return parser.parse_args()
 
 
@@ -343,9 +349,215 @@ def main():
         sys.exit(0)
 
     logger.info("Executing Laya-421M RLCD Trainer in full mode.")
-    res = run_dry_run()
+    res = run_decision_model_training(**vars(args))
     print(json.dumps(res, indent=2))
 
 
-if __name__ == "__main__":
+
+def decision_text(question, schema, sql):
+    """Canonical training/inference text; gold SQL never enters this representation."""
+    return f'<question>{question}</question>\n<answer>{sql}</answer>\n<schema>{schema}</schema>'
+
+
+def validate_decision_budget(tokenizer,question,sql,max_length):
+    """Retain the full question and candidate; only trailing schema may truncate."""
+    inputs=tokenizer(decision_text(question,'',sql),truncation=False,return_tensors='pt')
+    length=inputs['input_ids'].shape[-1]
+    if length > max_length:
+        raise ValueError(f'Question and candidate need {length} tokens; increase System-1 max_length={max_length}')
+    return length
+
+
+def build_candidate_dataset(records, db_dir, output_path=None, generator=None, num_candidates=4,
+                            include_gold=False):
+    """Label actual sampled/provided candidates by read-only execution comparison.
+
+    records are training questions with SQL/answer and either candidate SQLs in
+    ``candidates`` or a supplied CandidateGenerator backed by a trained checkpoint.
+    Gold positives may be added for training, never for benchmark generation.
+    """
+    import re
+    import sqlite3
+    from contextlib import closing
+    from src.training.runtime import resolve_db, load_records
+    from src.evaluation.metrics import execute_query_safely, compare_sql_results
+    if isinstance(records, (str, os.PathLike)):
+        records = load_records(records)
+    result = []
+    for row in records:
+        gold = row.get('SQL', row.get('answer'))
+        if not gold:
+            raise ValueError('Candidate labeling requires reference SQL in training records')
+        db = resolve_db(db_dir, row['db_id'])
+        ok, gold_rows = execute_query_safely(gold, db)
+        if not ok:
+            raise ValueError(f'Gold SQL failed for {row["db_id"]}: {gold_rows}')
+        schema = row.get('schema', row.get('ddl_statements',''))
+        if not schema:
+            with closing(sqlite3.connect(f'file:{db}?mode=ro',uri=True)) as conn:
+                schema = '\n'.join(r[0] for r in conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL ORDER BY name"))
+        candidates = row.get('candidates')
+        if candidates is None:
+            if generator is None or getattr(generator,'dry_run',False):
+                raise ValueError('Supply sampled candidates or a checkpoint-backed generator; no synthetic fallback')
+            from src.common.schemas import GenerationInput, CompactSubSchema
+            inp = GenerationInput(question=row['question'], sub_schema=CompactSubSchema(
+                db_id=row['db_id'], selected_tables=[], selected_columns={}, foreign_keys=[], ddl_statements=schema),
+                num_trajectories=num_candidates)
+            candidates = generator.generate(inp, num_candidates=num_candidates)
+        sqls = [c if isinstance(c,str) else (c['sql'] if isinstance(c,dict) else c.sql) for c in candidates]
+        if include_gold:
+            sqls.append(gold)
+        for sql in dict.fromkeys(sqls):
+            success, rows = execute_query_safely(sql, db)
+            label = int(success and compare_sql_results(rows, gold_rows,
+                        preserve_order=bool(re.search(r'\bORDER\s+BY\b',gold,re.I))))
+            result.append({'db_id':row['db_id'], 'question':row['question'],
+                           'schema':schema,
+                           'sql':sql, 'label':label, 'label_source':'execution_match'})
+    if output_path:
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        with open(output_path,'x',encoding='utf-8') as f:
+            for row in result:
+                f.write(json.dumps(row,ensure_ascii=False)+'\n')
+    return result
+
+
+def split_candidate_groups(records, seed=42):
+    """Keep all candidates from one database/question in exactly one split."""
+    groups = sorted({(r['db_id'],r['question']) for r in records})
+    if len(groups) < 3:
+        raise ValueError('Need at least three distinct questions for train/calibration/test splits')
+    random.Random(seed).shuffle(groups)
+    n_cal = max(1, int(len(groups)*0.15))
+    n_test = max(1, int(len(groups)*0.15))
+    cal = set(groups[:n_cal]); test = set(groups[n_cal:n_cal+n_test])
+    splits = ([],[],[])
+    for row in records:
+        key = (row['db_id'],row['question'])
+        splits[1 if key in cal else 2 if key in test else 0].append(row)
+    return splits
+
+
+def _train_decision(data_path, output_dir, export_dir=None, model_name_or_path='answerdotai/ModernBERT-large',
+                    calibration_path=None, test_path=None, max_steps=None, epochs=3, lr_backbone=1e-5,
+                    lr_head=1e-4, alpha_cal=0.5, target_ece=0.081, max_length=512,
+                    gradient_accumulation_steps=8, save_steps=50, device='cuda:0', seed=42,
+                    resume_from_checkpoint=None, **kwargs):
+    if not data_path or not output_dir:
+        raise ValueError('Real decision training requires labeled data_path and output_dir')
+    if not TORCH_AVAILABLE:
+        raise ImportError('Real System-1 training requires torch and transformers; no dry-run fallback')
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    destination=export_dir or os.path.join(output_dir,'final')
+    if os.path.exists(destination):
+        raise FileExistsError('System-1 final artifact exists; choose a fresh export/output directory to preserve weights')
+    from src.training.runtime import load_records, seed_everything, ExperimentLogger, save_checkpoint, load_checkpoint, latest_checkpoint, dataset_fingerprint
+    seed_everything(seed)
+    records = load_records(data_path)
+    for row in records:
+        if row.get('label') not in (0,1) or not row.get('sql'):
+            raise ValueError('Decision data must contain sql and execution-derived binary label')
+    if bool(calibration_path) != bool(test_path):
+        raise ValueError('Provide both calibration_path and test_path, or neither')
+    if calibration_path:
+        train,cal,test = records,load_records(calibration_path),load_records(test_path)
+        keys = [{(r['db_id'],r['question']) for r in split} for split in (train,cal,test)]
+        if any(keys[i].intersection(keys[j]) for i,j in ((0,1),(0,2),(1,2))):
+            raise ValueError('Question leakage between decision training/calibration/test splits')
+    else:
+        train,cal,test = split_candidate_groups(records,seed)
+    for split in (train,cal,test):
+        for row in split:
+            if row.get('label') not in (0,1) or not row.get('sql') or not row.get('schema'):
+                raise ValueError('All decision splits require schema, sql and binary labels')
+    random.Random(seed).shuffle(train)
+    if {r['label'] for r in train} != {0,1}:
+        raise ValueError('Decision training needs both correct and incorrect candidates')
+    if gradient_accumulation_steps < 1 or save_steps < 1:
+        raise ValueError('Accumulation and save_steps must be positive')
+    max_steps = max_steps if max_steps is not None else math.ceil(len(train)*epochs/gradient_accumulation_steps)
+    if max_steps < 1:
+        raise ValueError('max_steps must be positive')
+    amp = str(device).startswith('cuda')
+    if amp and not torch.cuda.is_available():
+        raise RuntimeError('CUDA requested but unavailable')
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+    for row in train+cal+test:
+        validate_decision_budget(tokenizer,row['question'],row['sql'],max_length)
+    # Eager attention works on T4 without FlashAttention 2 or BF16.
+    model = AutoModelForSequenceClassification.from_pretrained(model_name_or_path,num_labels=1,
+            attn_implementation='eager', torch_dtype=torch.float32).to(device)
+    model.gradient_checkpointing_enable()
+    optimizer = configure_dual_lr_optimizer(model,lr_backbone,lr_head)
+    scaler = torch.amp.GradScaler('cuda',enabled=amp)
+    log = ExperimentLogger(output_dir,dict(phase='system1',model=model_name_or_path,seed=seed,
+        max_steps=max_steps,max_length=max_length,gradient_accumulation_steps=gradient_accumulation_steps,
+        train_questions=len({(r['db_id'],r['question']) for r in train}),
+        calibration_questions=len({(r['db_id'],r['question']) for r in cal}),
+        test_questions=len({(r['db_id'],r['question']) for r in test})))
+    contract = dict(phase='system1',data_sha256=dataset_fingerprint(data_path),
+        calibration_sha256=dataset_fingerprint(calibration_path) if calibration_path else None,
+        test_sha256=dataset_fingerprint(test_path) if test_path else None,model_name_or_path=model_name_or_path,
+        max_length=max_length,seed=seed,gradient_accumulation_steps=gradient_accumulation_steps,
+        lr_backbone=lr_backbone,lr_head=lr_head,alpha_cal=alpha_cal)
+    log.log(event='resume_contract',contract=contract)
+    step=0
+    if resume_from_checkpoint:
+        path = latest_checkpoint(output_dir) if resume_from_checkpoint=='latest' else resume_from_checkpoint
+        if path is None:
+            raise FileNotFoundError('No complete decision checkpoint to resume')
+        state=load_checkpoint(path,model,optimizer,scaler=scaler)
+        if state.get('extra',{}).get('contract') != contract:
+            raise ValueError('System-1 resume data/config differ from saved checkpoint')
+        step=state['step']
+    def encode(row):
+        return {k:v.to(device) for k,v in tokenizer(decision_text(row['question'],row.get('schema',''),row['sql']),
+                  truncation=True,max_length=max_length,return_tensors='pt').items()}
+    model.train();optimizer.zero_grad(set_to_none=True)
+    while step < max_steps:
+        total=0.
+        for micro in range(gradient_accumulation_steps):
+            row=train[(step*gradient_accumulation_steps+micro)%len(train)]
+            labels=torch.tensor([float(row['label'])],device=device)
+            with torch.autocast('cuda' if amp else 'cpu',dtype=torch.float16 if amp else torch.bfloat16,enabled=amp):
+                logits=model(**encode(row)).logits.float().view(-1)
+                probs=logits.sigmoid()
+                loss=F.binary_cross_entropy_with_logits(logits,labels)+alpha_cal*((probs-labels)**2).mean()
+            scaler.scale(loss/gradient_accumulation_steps).backward()
+            total+=float(loss.detach())
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(),1.)
+        scaler.step(optimizer);scaler.update();optimizer.zero_grad(set_to_none=True)
+        step+=1
+        log.log(step=step,loss=total/gradient_accumulation_steps)
+        if step%save_steps==0 or step==max_steps:
+            save_checkpoint(output_dir,model,optimizer,step,scaler=scaler,tokenizer=tokenizer,
+                            extra={'phase':'system1','max_length':max_length,'contract':contract})
+    model.eval()
+    def predict(rows):
+        logits=[];labels=[]
+        with torch.inference_mode():
+            for row in rows:
+                logits.append(float(model(**encode(row)).logits.float().view(-1)[0]))
+                labels.append(row['label'])
+        return logits,labels
+    cal_logits,cal_labels=predict(cal)
+    temperature,cal_ece=fit_temperature(cal_logits,cal_labels)
+    test_logits,test_labels=predict(test)
+    metrics={'mode':'train','trained':True,'step':step,'temperature':temperature,'max_length':max_length,
+             'calibration_ece':cal_ece,'test_ece':compute_ece(calibrate_probabilities(test_logits,temperature),test_labels),
+             'test_ece_unscaled':compute_ece(calibrate_probabilities(test_logits),test_labels),
+             'target_ece':target_ece,'target_met':False,'test_candidates':len(test)}
+    metrics['target_met']=metrics['test_ece']<=target_ece
+    model.save_pretrained(destination);tokenizer.save_pretrained(destination)
+    with open(os.path.join(destination,'calibration_meta.json'),'w') as f:
+        json.dump(metrics,f,indent=2)
+    with open(os.path.join(output_dir,'training_summary.json'),'w') as f:
+        json.dump(dict(metrics,model_path=destination),f,indent=2)
+    return dict(metrics,model_path=destination)
+
+
+if __name__=='__main__':
     main()

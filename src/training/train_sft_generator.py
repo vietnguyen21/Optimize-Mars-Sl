@@ -15,6 +15,7 @@ import json
 import math
 import random
 import argparse
+from pathlib import Path
 import logging
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -216,60 +217,153 @@ def compute_completion_loss(
 
 
 class CompletionOnlyDataCollator:
+    """Tokenize prompt/completion separately and mask only the explicit boundary.
+
+    Concatenating token IDs avoids BPE boundary ambiguity. Padding is masked by
+    attention_mask, never by token identity (EOS is frequently also PAD).
+    Overlength examples fail rather than silently training on a missing answer.
     """
-    Data collator that masks prompt tokens with -100 so that loss is computed
-    strictly over completion tokens (<think>...</think><answer>...</answer>).
-    """
-    def __init__(
-        self,
-        tokenizer: Any = None,
-        think_tag: str = "<think>",
-        ignore_index: int = -100
-    ):
+    def __init__(self, tokenizer=None, think_tag="<think>", ignore_index=-100,
+                 max_length=1024):
         self.tokenizer = tokenizer
         self.think_tag = think_tag
         self.ignore_index = ignore_index
+        self.max_length = max_length
 
-    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if TORCH_AVAILABLE and self.tokenizer is not None:
-            # HuggingFace collator logic
-            texts = [item["formatted_prompt"] for item in batch]
-            encodings = self.tokenizer(
-                texts,
-                padding=True,
-                truncation=True,
-                return_tensors="pt"
-            )
-            input_ids = encodings["input_ids"]
-            attention_mask = encodings["attention_mask"]
-            labels = input_ids.clone()
-
-            # Find think_tag token sequence
-            tag_tokens = self.tokenizer.encode(self.think_tag, add_special_tokens=False)
-            tag_len = len(tag_tokens)
-
-            for b in range(input_ids.size(0)):
-                seq = input_ids[b].tolist()
-                found_idx = -1
-                for i in range(len(seq) - tag_len + 1):
-                    if seq[i : i + tag_len] == tag_tokens:
-                        found_idx = i
-                        break
-
-                if found_idx != -1:
-                    labels[b, :found_idx] = self.ignore_index
-                # Mask padding tokens
-                pad_token_id = self.tokenizer.pad_token_id or 0
-                labels[b, input_ids[b] == pad_token_id] = self.ignore_index
-
-            return {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "labels": labels
-            }
+    def encode_example(self, item):
+        from src.training.runtime import build_prompt
+        if "input_ids" in item and "labels" in item:
+            result = dict(item)
+            if len(result["input_ids"]) > self.max_length:
+                raise ValueError("Encoded example exceeds max_length")
+            return result
+        if "question" in item:
+            prompt = build_prompt(item["question"], item.get("schema", item.get("ddl_statements", "")))
+            answer = item.get("answer", item.get("SQL", item.get("sql", "")))
+            if not answer:
+                raise ValueError("SFT record requires answer/SQL/sql")
+            reasoning = item.get("think_steps", item.get("reasoning", item.get("evidence", "")))
+            completion = f"<think>\n{reasoning}\n</think>\n<answer>\n{answer}\n</answer>"
+        elif "prompt" in item and "completion" in item:
+            prompt, completion = item["prompt"], item["completion"]
         else:
-            # Standalone batch structure
+            text = item.get("formatted_prompt", "")
+            if self.think_tag not in text:
+                raise ValueError("No explicit completion boundary in SFT record")
+            prompt, suffix = text.split(self.think_tag, 1)
+            completion = self.think_tag + suffix
+        prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=True)
+        if not prompt_ids:
+            raise ValueError("A nonempty prompt is required for next-token supervision")
+        # Split at SQL boundaries too, so target pooling never relies on a
+        # guessed prefix length under BPE token merging.
+        answer_open = completion.find("<answer>")
+        answer_close = completion.find("</answer>", answer_open + len("<answer>")) if answer_open >= 0 else -1
+        if answer_open >= 0 and answer_close >= 0:
+            prefix_end = answer_open + len("<answer>")
+            prefix_ids = self.tokenizer.encode(completion[:prefix_end], add_special_tokens=False)
+            sql_ids = self.tokenizer.encode(completion[prefix_end:answer_close], add_special_tokens=False)
+            suffix_ids = self.tokenizer.encode(completion[answer_close:], add_special_tokens=False)
+            completion_ids = prefix_ids + sql_ids + suffix_ids
+            sql_start = len(prompt_ids) + len(prefix_ids)
+            sql_end = sql_start + len(sql_ids)
+        else:
+            completion_ids = self.tokenizer.encode(completion, add_special_tokens=False)
+            sql_start, sql_end = len(prompt_ids), len(prompt_ids) + len(completion_ids)
+        eos = self.tokenizer.eos_token_id
+        if eos is not None and (not completion_ids or completion_ids[-1] != eos):
+            completion_ids.append(eos)
+        if not completion_ids:
+            raise ValueError("Empty completion")
+        ids = prompt_ids + completion_ids
+        if len(ids) > self.max_length:
+            raise ValueError(f"Example has {len(ids)} tokens > max_length={self.max_length}; preprocess or increase max_length")
+        return {"input_ids": ids, "attention_mask": [1] * len(ids),
+                "labels": [-100] * len(prompt_ids) + completion_ids,
+                "pred_position": len(prompt_ids) - 1,
+                "sql_start": min(sql_start, len(ids) - 1), "sql_end": sql_end}
+
+    def __call__(self, batch):
+        if self.tokenizer is None:
             return {"batch": batch}
+        if not TORCH_AVAILABLE:
+            raise RuntimeError("PyTorch is required for real SFT collation")
+        encoded = [self.encode_example(item) for item in batch]
+        width = max(len(x["input_ids"]) for x in encoded)
+        pad = self.tokenizer.pad_token_id
+        if pad is None:
+            raise ValueError("Tokenizer requires a pad_token_id")
+        ids, labels, masks = [], [], []
+        for item in encoded:
+            n = width - len(item["input_ids"])
+            ids.append(item["input_ids"] + [pad] * n)
+            masks.append(item.get("attention_mask", [1] * len(item["input_ids"])) + [0] * n)
+            labels.append(item["labels"] + [self.ignore_index] * n)
+        return {"input_ids": torch.tensor(ids, dtype=torch.long),
+                "attention_mask": torch.tensor(masks, dtype=torch.long),
+                "labels": torch.tensor(labels, dtype=torch.long),
+                "pred_positions": torch.tensor([x["pred_position"] for x in encoded]),
+                "sql_starts": torch.tensor([x["sql_start"] for x in encoded]),
+                "sql_ends": torch.tensor([x.get("sql_end", len(x["input_ids"])) for x in encoded])}
+
+
+def joint_sft_jepa_loss(model, batch, predictor=None, lambda_jepa=0.0,
+                        loss_dropout=0.5):
+    """Genuine CE + stop-gradient latent alignment in one causal forward.
+
+    The two-block mask equals the ordinary triangular causal mask: the final
+    prompt anchor (last subtoken of literal [PRED]) cannot see completion tokens.
+    SQL targets are pooled from completion hidden states and detached. No target
+    token is fed into the context anchor, and no vocabulary resize is needed.
+    """
+    use_jepa = predictor is not None and lambda_jepa > 0
+    outputs = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"],
+                    labels=batch["labels"], output_hidden_states=use_jepa,
+                    use_cache=False)
+    ce = outputs.loss
+    auxiliary = ce.new_zeros(())
+    if use_jepa and (not model.training or random.random() >= loss_dropout):
+        hidden = outputs.hidden_states[-1]
+        index = torch.arange(hidden.shape[0], device=hidden.device)
+        context = hidden[index, batch["pred_positions"]]
+        positions = torch.arange(hidden.shape[1], device=hidden.device)[None, :]
+        target_mask = ((positions >= batch["sql_starts"][:, None])
+            & (positions < batch["sql_ends"][:, None]) & batch["attention_mask"].bool())
+        target = (hidden.detach() * target_mask[..., None]).sum(1) / target_mask.sum(1, keepdim=True).clamp_min(1)
+        prediction = predictor(context.float())
+        auxiliary = (1 - F.cosine_similarity(prediction, target.float(), dim=-1)).mean()
+    return ce + lambda_jepa * auxiliary, {"ce_loss": float(ce.detach()),
+                                        "jepa_loss": float(auxiliary.detach())}
+
+
+def _optimizer_update(parameters, optimizer, scaler, pending, max_grad_norm=1.0):
+    """Average actual accumulated microbatches, including the last partial group."""
+    scaler.unscale_(optimizer)
+    for parameter in parameters:
+        if parameter.grad is not None:
+            parameter.grad.div_(pending)
+    torch.nn.utils.clip_grad_norm_(parameters, max_grad_norm)
+    old_scale = scaler.get_scale()
+    scaler.step(optimizer)
+    scaler.update()
+    optimizer.zero_grad(set_to_none=True)
+    return scaler.get_scale() >= old_scale
+
+
+def _resolve_resume(resume, output_dir):
+    from src.training.runtime import latest_checkpoint
+    if resume == "latest":
+        return latest_checkpoint(output_dir)
+    if resume and not (Path(resume) / "COMPLETE").is_file():
+        raise ValueError(f"Incomplete or missing resume checkpoint: {resume}")
+    return resume
+
+
+def _generation_extra(kind, fingerprint, epoch, batch_index, predictor=None, **kwargs):
+    return dict(kind=kind, dataset_fingerprint=fingerprint, epoch=epoch,
+                batch_index=batch_index,
+                predictor=predictor.state_dict() if predictor is not None else None,
+                **kwargs)
 
 
 def run_dry_run(
@@ -349,7 +443,7 @@ def run_dry_run(
 
     # Verify LoRA configuration creation
     lora_cfg = build_lora_config(rank=512, alpha=16)
-    logger.info(f"[DryRun] ✅ LoRA config verified: rank={getattr(lora_cfg, 'r', lora_cfg.get('r'))}, targets={TARGET_MODULES_DEFAULT}")
+    logger.info(f"[DryRun] ✅ LoRA config verified: rank={getattr(lora_cfg, 'r', None)}, targets={TARGET_MODULES_DEFAULT}")
 
     return {
         "status": "PASSED",
@@ -362,112 +456,154 @@ def run_dry_run(
 
 
 def run_sft_training(
-    data_path: str = "data/mini/mini_synsql.jsonl",
-    output_dir: str = "/content/checkpoints/sft_jepa_3b",
-    drive_dir: Optional[str] = None,
-    epochs: int = 3,
-    batch_size: int = 2,
-    learning_rate: float = 2e-4,
-    dry_run: bool = True,
-    **kwargs: Any
-) -> Dict[str, Any]:
-    """Runner function executing SFT + JEPA training (dry-run or full)."""
-    return run_dry_run(data_path=data_path)
+    data_path="data/mini/mini_synsql.jsonl", output_dir="/kaggle/working/sft_jepa_3b",
+    drive_dir=None, epochs=3, batch_size=1, learning_rate=2e-4,
+    dry_run=False, **kwargs
+):
+    """Train a real QLoRA adapter; only explicit dry_run executes synthetic checks.
+
+    Use lambda_jepa=0 for SFT-only. A checkpoint includes the external JEPA
+    predictor, optimizer, scaler, RNG states, and the next data cursor. A single
+    microbatch/device is the T4 default; two GPUs are not pooled.
+    """
+    if dry_run:
+        return dict(run_dry_run(data_path=data_path), mode="smoke", trained=False)
+    if not TORCH_AVAILABLE:
+        raise RuntimeError("Real SFT requires PyTorch, Transformers, PEFT and bitsandbytes; use dry_run=True only for smoke tests")
+    from src.training.runtime import (load_records, seed_everything, load_causal_model,
+        ExperimentLogger, dataset_fingerprint, save_checkpoint, load_checkpoint)
+    from src.training.jepa_module import LLM_JEPAPredictor
+    max_steps = int(kwargs.get("max_steps", 100))
+    save_steps = int(kwargs.get("save_steps", 50))
+    accum = int(kwargs.get("gradient_accumulation_steps", 8))
+    max_length = int(kwargs.get("max_length", kwargs.get("max_seq_length", 1024)))
+    seed = int(kwargs.get("seed", 42))
+    device = kwargs.get("device", "cuda:0")
+    lambda_jepa = float(kwargs.get("lambda_jepa", 1.0))
+    loss_dropout = float(kwargs.get("loss_dropout", 0.5))
+    if min(max_steps, save_steps, accum, batch_size, epochs) <= 0 or lambda_jepa < 0 or not 0 <= loss_dropout <= 1:
+        raise ValueError("Invalid SFT counts or JEPA configuration")
+    seed_everything(seed)
+    rows = load_records(data_path)
+    resume = _resolve_resume(kwargs.get("resume_from_checkpoint", kwargs.get("resume")), output_dir)
+    model, tokenizer = kwargs.get("model"), kwargs.get("tokenizer")
+    if model is None or tokenizer is None:
+        source = kwargs.get("model_name_or_path", "meta-llama/Llama-3.2-3B-Instruct")
+        model, tokenizer = load_causal_model(source, adapter_path=resume, training=True,
+                                            device=device, rank=int(kwargs.get("lora_rank", 16)))
+    collator = CompletionOnlyDataCollator(tokenizer, max_length=max_length)
+    encoded = []
+    dropped = 0
+    for row in rows:
+        try:
+            encoded.append(collator.encode_example(row))
+        except ValueError as exc:
+            if "max_length=" not in str(exc):
+                raise
+            dropped += 1
+    if not encoded:
+        raise ValueError("No SFT examples fit max_length; increase it or preprocess the dataset")
+    predictor = (LLM_JEPAPredictor(model.config.hidden_size,
+                 intermediate_dim=int(kwargs.get("predictor_dim", 256))).to(device)
+                 if lambda_jepa > 0 else None)
+    parameters = [p for p in model.parameters() if p.requires_grad]
+    if predictor is not None:
+        parameters += list(predictor.parameters())
+    optimizer = torch.optim.AdamW(parameters, lr=learning_rate)
+    scaler = torch.amp.GradScaler("cuda", enabled=str(device).startswith("cuda"))
+    fingerprint = dataset_fingerprint(data_path)
+    contract = dict(batch_size=batch_size, accumulation=accum, max_length=max_length,
+                    seed=seed, lambda_jepa=lambda_jepa, loss_dropout=loss_dropout,
+                    learning_rate=learning_rate, predictor_dim=int(kwargs.get("predictor_dim", 256)))
+    logger = ExperimentLogger(output_dir, dict(stage="sft", mode="train", **contract,
+        model_source=kwargs.get("model_name_or_path", "meta-llama/Llama-3.2-3B-Instruct"),
+        lora_rank=int(kwargs.get("lora_rank", 16)),
+        dropped_overlength=dropped, examples=len(encoded)))
+    step, first_epoch, first_batch = 0, 0, 0
+    if resume:
+        state = load_checkpoint(resume, model, optimizer, scaler=scaler)
+        extra = state["extra"]
+        if extra.get("kind") != "sft" or extra.get("dataset_fingerprint") != fingerprint or extra.get("contract") != contract:
+            raise ValueError("Resume checkpoint belongs to a different SFT dataset/configuration")
+        if predictor is not None:
+            predictor.load_state_dict(extra["predictor"])
+        step, first_epoch, first_batch = state["step"], extra["epoch"], extra["batch_index"]
+    optimizer.zero_grad(set_to_none=True)
+    checkpoint = resume
+    last_saved_step = step if resume else None
+    epoch, next_batch = first_epoch, first_batch
+    model.train()
+    for epoch in range(first_epoch, int(epochs)):
+        order = list(range(len(encoded)))
+        random.Random(seed + epoch).shuffle(order)
+        batches = [order[i:i + batch_size] for i in range(0, len(order), batch_size)]
+        pending = 0
+        for batch_index in range(first_batch if epoch == first_epoch else 0, len(batches)):
+            if step >= max_steps:
+                break
+            batch = {k: v.to(device) for k, v in collator([encoded[i] for i in batches[batch_index]]).items()}
+            with torch.autocast(device_type="cuda" if str(device).startswith("cuda") else "cpu",
+                                dtype=torch.float16 if str(device).startswith("cuda") else torch.bfloat16,
+                                enabled=str(device).startswith("cuda")):
+                loss, metrics = joint_sft_jepa_loss(model, batch, predictor, lambda_jepa, loss_dropout)
+            if not torch.isfinite(loss):
+                raise FloatingPointError("Nonfinite SFT objective")
+            scaler.scale(loss).backward()
+            pending += 1
+            next_batch = batch_index + 1
+            if pending == accum or next_batch == len(batches):
+                updated = _optimizer_update(parameters, optimizer, scaler, pending)
+                pending = 0
+                if updated:
+                    step += 1
+                logger.log(step=step, epoch=epoch, loss=float(loss.detach()),
+                           optimizer_updated=updated, **metrics)
+                if updated and step % save_steps == 0:
+                    checkpoint = save_checkpoint(output_dir, model, optimizer, step, scaler=scaler,
+                        tokenizer=tokenizer, extra=_generation_extra("sft", fingerprint,
+                        epoch + int(next_batch == len(batches)), 0 if next_batch == len(batches) else next_batch,
+                        predictor, contract=contract))
+                    last_saved_step = step
+            del loss, batch
+        if step >= max_steps:
+            break
+        next_batch = len(batches)
+    if step != last_saved_step:
+        checkpoint = save_checkpoint(output_dir, model, optimizer, step, scaler=scaler,
+            tokenizer=tokenizer, extra=_generation_extra("sft", fingerprint,
+            epoch + int(next_batch == len(batches)), 0 if next_batch == len(batches) else next_batch,
+                        predictor, contract=contract))
+    result = dict(status="COMPLETED", mode="train", trained=step > 0, optimizer_steps=step,
+                  checkpoint_path=checkpoint, lambda_jepa=lambda_jepa,
+                  examples=len(encoded), dropped_overlength=dropped)
+    logger.log(event="finished", **result)
+    return result
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Completion-Only SFT Trainer for Text-to-SQL SLMs")
-    parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-Coder-7B-Instruct",
-                        help="HuggingFace model ID or local path (e.g., FINER-SQL-3B or Qwen2.5-Coder-7B)")
-    parser.add_argument("--data_path", type=str, default="data/mini/mini_synsql.jsonl",
-                        help="Path to SFT JSONL dataset")
-    parser.add_argument("--output_dir", type=str, default="/content/checkpoints/finer_sql_3b",
-                        help="Local checkpoint output directory")
-    parser.add_argument("--drive_dir", type=str, default="/content/drive/MyDrive/Text2SQL_Colab/checkpoints/finer_sql_3b",
-                        help="Google Drive persistent checkpoint directory")
-    parser.add_argument("--lora_rank", type=int, default=64,
-                        help="LoRA rank dimension (64 to 512)")
-    parser.add_argument("--lora_alpha", type=int, default=16,
-                        help="LoRA alpha scaling")
-    parser.add_argument("--learning_rate", type=float, default=2e-5,
-                        help="Learning rate for SFT")
-    parser.add_argument("--batch_size", type=int, default=2,
-                        help="Per-device train batch size")
-    parser.add_argument("--num_epochs", type=int, default=3,
-                        help="Number of training epochs")
-    parser.add_argument("--resume_from_checkpoint", type=str, default=None,
-                        help="Checkpoint path or 'latest' to resume from Google Drive / local")
-    parser.add_argument("--dry_run", action="store_true",
-                        help="Run dry run verification on mini dataset without loading heavy model")
+    parser = argparse.ArgumentParser(description="QLoRA completion-only SFT + JEPA")
+    parser.add_argument("--model_name_or_path", default="meta-llama/Llama-3.2-3B-Instruct")
+    parser.add_argument("--data_path", default="data/mini/mini_synsql.jsonl")
+    parser.add_argument("--output_dir", default="/kaggle/working/sft_jepa_3b")
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--lora_rank", type=int, default=16)
+    parser.add_argument("--learning_rate", type=float, default=2e-4)
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--epochs", "--num_epochs", type=int, default=3)
+    parser.add_argument("--max_steps", type=int, default=100)
+    parser.add_argument("--max_length", type=int, default=1024)
+    parser.add_argument("--save_steps", type=int, default=50)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
+    parser.add_argument("--lambda_jepa", type=float, default=1.0)
+    parser.add_argument("--loss_dropout", type=float, default=0.5)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--resume_from_checkpoint", default=None)
+    parser.add_argument("--dry_run", action="store_true")
     return parser.parse_args()
 
 
 def main():
-    args = parse_args()
-
-    if args.dry_run:
-        result = run_dry_run(data_path=args.data_path)
-        print(json.dumps(result, indent=2))
-        sys.exit(0)
-
-    logger.info(f"Starting SFT Trainer on model: {args.model_name_or_path}")
-
-    # Check for resume checkpoint
-    resume_path = get_resume_checkpoint(args.resume_from_checkpoint, args.output_dir, args.drive_dir)
-    if resume_path:
-        logger.info(f"Resuming training from checkpoint: {resume_path}")
-
-    if not (TRANSFORMERS_AVAILABLE and TORCH_AVAILABLE):
-        logger.warning("PyTorch and Transformers not found in this environment. Falling back to --dry_run mode.")
-        result = run_dry_run(data_path=args.data_path)
-        print(json.dumps(result, indent=2))
-        sys.exit(0)
-
-    # Full HuggingFace training execution
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name_or_path,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
-        device_map="auto",
-        trust_remote_code=True
-    )
-
-    if PEFT_AVAILABLE:
-        lora_config = build_lora_config(rank=args.lora_rank, alpha=args.lora_alpha)
-        model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()
-
-    drive_callback = DriveCheckpointCallback(
-        drive_checkpoint_dir=args.drive_dir,
-        local_checkpoint_dir=args.output_dir
-    )
-
-    training_args = TrainingArguments(
-        output_dir=args.output_dir,
-        learning_rate=args.learning_rate,
-        per_device_train_batch_size=args.batch_size,
-        num_train_epochs=args.num_epochs,
-        save_strategy="steps",
-        save_steps=500,
-        logging_steps=50,
-        bf16=torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False,
-        fp16=not torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False
-    )
-
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        tokenizer=tokenizer,
-        data_collator=CompletionOnlyDataCollator(tokenizer=tokenizer),
-        callbacks=[drive_callback]
-    )
-
-    trainer.train(resume_from_checkpoint=resume_path)
-    trainer.save_model(os.path.join(args.output_dir, "best_model"))
-    logger.info("Training complete and model saved.")
+    print(json.dumps(run_sft_training(**vars(parse_args())), indent=2))
 
 
 if __name__ == "__main__":

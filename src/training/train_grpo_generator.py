@@ -7,7 +7,7 @@ Implements FINER-SQL Dense GRPO with 4 fine-grained reward heads:
   3. R_mem in [0, 1]: Soft semantic thought-matching reward against Reasoning Bank patterns.
   4. R_atomic in [0, 1]: AST clause matching reward (SELECT, FROM, WHERE, GROUP BY, ORDER BY).
 
-Resolves Advantage Collapse by ensuring non-zero variance and normalized group advantages:
+Normalizes informative groups; zero-variance groups have zero advantages and are skipped:
   A_j = (R_j - mean(R)) / (std(R) + eps).
 
 Supports full TRL / custom GRPO execution and standalone --dry_run mode on data/mini/.
@@ -21,6 +21,8 @@ import math
 import sqlite3
 import argparse
 import logging
+from pathlib import Path
+import random
 from typing import Optional, List, Dict, Any, Tuple, Union
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -93,35 +95,11 @@ def clean_sql_query(sql_text: str) -> str:
     return s.rstrip(";")
 
 
-def execute_sqlite_query(query: str, db_path: str, timeout: float = 3.0) -> Tuple[bool, Any, Optional[str]]:
-    """
-    Executes an SQL query safely against a SQLite database.
-    
-    Returns:
-        Tuple of (success_bool, result_set_or_empty, error_message_or_None)
-    """
-    if not os.path.exists(db_path):
-        return False, None, f"Database file not found: {db_path}"
-
-    cleaned = clean_sql_query(query)
-    if not cleaned:
-        return False, None, "Empty SQL query"
-
-    # Enforce read-only execution
-    forbidden = ["DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "CREATE", "ATTACH", "DETACH"]
-    first_word = cleaned.split()[0].upper() if cleaned.split() else ""
-    if first_word in forbidden:
-        return False, None, f"Forbidden non-query statement: {first_word}"
-
-    try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=timeout)
-        cursor = conn.cursor()
-        cursor.execute(cleaned)
-        rows = cursor.fetchall()
-        conn.close()
-        return True, rows, None
-    except Exception as e:
-        return False, None, str(e)
+def execute_sqlite_query(query, db_path, timeout=3.0):
+    """Read-only execution with a SQLite VM deadline (not only a lock timeout)."""
+    from src.evaluation.metrics import execute_query_safely
+    ok, rows = execute_query_safely(clean_sql_query(query), db_path, timeout=timeout)
+    return (True, rows, None) if ok else (False, None, str(rows))
 
 
 def compute_exec_reward(
@@ -145,16 +123,10 @@ def compute_exec_reward(
         # If gold query itself cannot run, treat clean candidate execution as valid SQL (1.0)
         return 1.0
 
-    # Compare result sets
-    if cand_rows == gold_rows:
+    from src.evaluation.metrics import compare_sql_results
+    if compare_sql_results(cand_rows, gold_rows,
+            preserve_order=bool(re.search(r"\bORDER\s+BY\b", gold_sql, re.I))):
         return 2.0
-
-    # Compare unordered multisets if ordering is not strictly required
-    try:
-        if sorted(cand_rows) == sorted(gold_rows):
-            return 2.0
-    except Exception:
-        pass
 
     return 1.0
 
@@ -229,6 +201,28 @@ def extract_sql_clauses(sql: str) -> Dict[str, set]:
     """
     Deconstructs SQL into atomic clauses: SELECT, FROM, WHERE, GROUP BY, ORDER BY.
     """
+    # SQLGlot supplies actual clause boundaries, including nested queries.
+    # The lexical fallback remains only for dependency-free smoke tests.
+    try:
+        import sqlglot
+        tree = sqlglot.parse_one(clean_sql_query(sql), read="sqlite")
+        if tree is None:
+            return {key: set() for key in ["SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY"]}
+        result = {}
+        nodes = {"SELECT": tree.args.get("expressions", []),
+                 "FROM": [tree.args.get("from_") or tree.args.get("from")] + tree.args.get("joins", []),
+                 "WHERE": [tree.args.get("where")], "GROUP BY": [tree.args.get("group")],
+                 "ORDER BY": [tree.args.get("order")]}
+        for key, values in nodes.items():
+            result[key] = set()
+            for node in values:
+                if node is not None:
+                    result[key].update(re.findall(r"\b[A-Z0-9_\.]+\b", node.sql(dialect="sqlite", normalize=True).upper()))
+        return result
+    except ImportError:
+        pass
+    except Exception:
+        return {key: set() for key in ["SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY"]}
     cleaned = clean_sql_query(sql).upper()
     clauses = {
         "SELECT": set(),
@@ -268,6 +262,14 @@ def compute_atomic_reward(candidate_sql: str, gold_sql: str) -> float:
     if not candidate_sql or not gold_sql:
         return 0.0
 
+    try:
+        import sqlglot
+        if sqlglot.parse_one(clean_sql_query(candidate_sql), read="sqlite") is None:
+            return 0.0
+    except ImportError:
+        pass  # Explicit smoke mode can operate without the AST dependency.
+    except Exception:
+        return 0.0
     c_clauses = extract_sql_clauses(candidate_sql)
     g_clauses = extract_sql_clauses(gold_sql)
 
@@ -355,10 +357,14 @@ def normalize_group_advantages(
 
     mean_r = sum(rewards) / g
     var_r = sum((r - mean_r) ** 2 for r in rewards) / g
+    if effective_eps <= 0 or not all(math.isfinite(r) for r in rewards):
+        raise ValueError("Advantages require finite rewards and positive epsilon")
+    if var_r <= effective_eps ** 2:
+        return [0.0] * g
     std_r = math.sqrt(var_r) + effective_eps
 
     advantages = [(r - mean_r) / std_r for r in rewards]
-    return [round(a, 4) for a in advantages]
+    return advantages
 
 
 def compute_grpo_loss(
@@ -366,7 +372,8 @@ def compute_grpo_loss(
     ref_logprobs: List[float],
     advantages: List[float],
     clip_eps: float = 0.2,
-    beta_kl: float = 0.04
+    beta_kl: float = 0.04,
+    old_logprobs: Optional[List[float]] = None
 ) -> float:
     """
     Computes GRPO clipped policy surrogate loss with KL penalty.
@@ -377,10 +384,13 @@ def compute_grpo_loss(
     if g == 0:
         return 0.0
 
+    if not (len(ref_logprobs) == len(advantages) == g) or (old_logprobs is not None and len(old_logprobs) != g):
+        raise ValueError("Policy, old-policy, reference, and advantage counts must match")
     losses = []
-    for lp, ref_lp, adv in zip(logprobs, ref_logprobs, advantages):
-        # Ratio w = exp(lp - ref_lp)
-        ratio = math.exp(lp - ref_lp)
+    old = old_logprobs if old_logprobs is not None else list(logprobs)
+    for lp, ref_lp, old_lp, adv in zip(logprobs, ref_logprobs, old, advantages):
+        # PPO ratio uses the sampled OLD policy, never the frozen reference.
+        ratio = math.exp(lp - old_lp)
         surr1 = ratio * adv
         surr2 = max(min(ratio, 1.0 + clip_eps), 1.0 - clip_eps) * adv
         policy_loss = -min(surr1, surr2)
@@ -529,46 +539,249 @@ def run_dry_run(
     }
 
 
-def run_grpo_training(
-    data_path: str = "data/mini/mini_bird.jsonl",
-    db_dir: str = "data/mini",
-    output_dir: Optional[str] = None,
-    drive_dir: Optional[str] = None,
-    num_rollouts: int = 4,
-    epochs: int = 2,
-    learning_rate: float = 5e-6,
-    dry_run: bool = True,
-    **kwargs: Any
-) -> Dict[str, Any]:
-    """Runner function executing Dense GRPO training (dry-run or full)."""
-    group_size = kwargs.get("group_size", num_rollouts)
-    return run_dry_run(mini_bird_path=data_path, db_dir=db_dir, group_size=group_size)
+def completion_token_logprobs(model, token_ids, prompt_length, temperature=1.0):
+    """Return only sampled response-token log probabilities, retaining gradients."""
+    outputs = model(input_ids=token_ids, attention_mask=torch.ones_like(token_ids), use_cache=False)
+    logits = outputs.logits[:, prompt_length - 1:-1, :].float() / temperature
+    targets = token_ids[:, prompt_length:]
+    # logsumexp avoids retaining a full vocabulary-sized softmax result.
+    selected = logits.gather(-1, targets[..., None]).squeeze(-1) - logits.logsumexp(-1)
+    return selected.squeeze(0)
+
+
+def grpo_token_objective(new_logprobs, old_logprobs, reference_logprobs, advantage,
+                         clip_eps=0.2, beta_kl=0.04):
+    """Differentiable clipped tokenwise GRPO with k3 reference KL estimator.
+
+    Old-policy probabilities are sampled before ANY group optimizer update.
+    The immutable SFT reference is used only by KL. EOS is included and padding
+    excluded by passing one unpadded response at a time.
+    """
+    ratio = (new_logprobs - old_logprobs.detach()).exp()
+    surrogate = torch.minimum(ratio * advantage,
+        ratio.clamp(1 - clip_eps, 1 + clip_eps) * advantage)
+    delta = reference_logprobs.detach() - new_logprobs
+    kl = delta.exp() - delta - 1
+    return (-surrogate + beta_kl * kl).mean()
+
+
+def _schema_for_record(record, db_path):
+    if record.get("schema") or record.get("ddl_statements"):
+        return record.get("schema", record.get("ddl_statements", ""))
+    connection = sqlite3.connect(f"file:{Path(db_path).resolve()}?mode=ro", uri=True)
+    try:
+        return ";\n".join(row[0] for row in connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL ORDER BY name"))
+    finally:
+        connection.close()
+
+
+def _activate_adapter(model, name):
+    model.set_adapter(name)
+    for pname, parameter in model.named_parameters():
+        if ".reference." in pname:
+            parameter.requires_grad_(False)
+
+
+def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
+    output_dir=None, drive_dir=None, num_rollouts=4, epochs=2,
+    learning_rate=5e-6, dry_run=False, **kwargs):
+    """Sequential, memory-bounded policy optimization from a genuine SFT adapter.
+
+    One shared frozen NF4 base holds trainable policy and immutable reference
+    LoRA adapters. Responses are sampled from the model without gold SQL; labels
+    are used exclusively for the four rewards. Zero-variance groups are skipped,
+    not perturbed to manufacture advantages. Checkpoints include both adapters.
+    """
+    group_size = int(kwargs.get("group_size", num_rollouts))
+    if dry_run:
+        return dict(run_dry_run(mini_bird_path=data_path, db_dir=db_dir,
+                                group_size=group_size), mode="smoke", trained=False)
+    if not TORCH_AVAILABLE:
+        raise RuntimeError("Real GRPO requires PyTorch/Transformers/PEFT/bitsandbytes; dry_run=True is smoke only")
+    from src.training.runtime import (load_records, build_prompt, load_causal_model,
+        seed_everything, resolve_db, ExperimentLogger, dataset_fingerprint,
+        save_checkpoint, load_checkpoint)
+    from src.training.train_sft_generator import _optimizer_update, _resolve_resume, _generation_extra
+    import sqlglot  # Required for genuine atomic AST rewards, optional only in smoke mode.
+    sft_checkpoint = kwargs.get("sft_checkpoint", kwargs.get("adapter_path"))
+    if not sft_checkpoint or not (Path(sft_checkpoint) / "adapter_config.json").is_file():
+        raise ValueError("GRPO requires sft_checkpoint pointing to an exported SFT PEFT adapter")
+    output_dir = output_dir or "/kaggle/working/grpo_3b"
+    device = kwargs.get("device", "cuda:0")
+    max_steps = int(kwargs.get("max_steps", 100))
+    save_steps = int(kwargs.get("save_steps", 25))
+    accum = int(kwargs.get("gradient_accumulation_steps", 1))
+    max_length = int(kwargs.get("max_length", 1024))
+    max_new_tokens = int(kwargs.get("max_new_tokens", 128))
+    seed = int(kwargs.get("seed", 42))
+    clip_eps = float(kwargs.get("clip_eps", 0.2))
+    beta_kl = float(kwargs.get("beta_kl", 0.04))
+    temperature = float(kwargs.get("temperature", 1.0))
+    if min(max_steps, save_steps, accum, max_new_tokens, epochs) <= 0 or group_size < 2:
+        raise ValueError("GRPO needs positive counts and at least two sampled responses per group")
+    if max_length <= max_new_tokens or not math.isfinite(temperature) or temperature <= 0 or beta_kl < 0 or not 0 < clip_eps < 1:
+        raise ValueError("Invalid GRPO length, temperature, KL, or clipping configuration")
+    seed_everything(seed)
+    rows = load_records(data_path)
+    resume = _resolve_resume(kwargs.get("resume_from_checkpoint", kwargs.get("resume")), output_dir)
+    model, tokenizer = load_causal_model(kwargs.get("model_name_or_path", "meta-llama/Llama-3.2-3B-Instruct"),
+        adapter_path=resume or sft_checkpoint, training=True, device=device,
+        rank=int(kwargs.get("lora_rank", 16)))
+    reference_source = Path(resume) / "reference" if resume and (Path(resume) / "reference").exists() else Path(sft_checkpoint)
+    model.load_adapter(str(reference_source), adapter_name="reference", is_trainable=False)
+    _activate_adapter(model, "default")
+    # Keep sampled and optimized policies identical even if a backbone has dropout.
+    for module in model.modules():
+        if isinstance(module, torch.nn.Dropout):
+            module.p = 0.0
+    parameters = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(parameters, lr=learning_rate)
+    scaler = torch.amp.GradScaler("cuda", enabled=str(device).startswith("cuda"))
+    fingerprint = dataset_fingerprint(data_path)
+    reference_weights = next((reference_source / name for name in
+        ("adapter_model.safetensors", "adapter_model.bin") if (reference_source / name).exists()), None)
+    if reference_weights is None:
+        raise FileNotFoundError("Missing reference SFT adapter weights")
+    contract = dict(group_size=group_size, accumulation=accum, max_length=max_length,
+        max_new_tokens=max_new_tokens, seed=seed, beta_kl=beta_kl, clip_eps=clip_eps,
+        temperature=temperature, learning_rate=learning_rate,
+        reference_sha256=dataset_fingerprint(reference_weights))
+    logger = ExperimentLogger(output_dir, dict(stage="grpo", mode="train", **contract))
+    step, first_epoch, first_index = 0, 0, 0
+    if resume:
+        state = load_checkpoint(resume, model, optimizer, scaler=scaler)
+        extra = state["extra"]
+        if extra.get("kind") != "grpo" or extra.get("dataset_fingerprint") != fingerprint or extra.get("contract") != contract:
+            raise ValueError("Resume checkpoint belongs to another GRPO dataset/configuration")
+        step, first_epoch, first_index = state["step"], extra["epoch"], extra["batch_index"]
+    optimizer.zero_grad(set_to_none=True)
+    checkpoint = resume
+    last_saved_step = step if resume else None
+    skipped_zero, skipped_long, pending = 0, 0, 0
+    epoch, next_index = first_epoch, first_index
+    for epoch in range(first_epoch, int(epochs)):
+        order = list(range(len(rows)))
+        random.Random(seed + epoch).shuffle(order)
+        for record_index in range(first_index if epoch == first_epoch else 0, len(order)):
+            if step >= max_steps:
+                break
+            item = rows[order[record_index]]
+            db_path = resolve_db(db_dir, item["db_id"])
+            schema = _schema_for_record(item, db_path)
+            prompt = build_prompt(item["question"], schema)
+            prompt_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=True)["input_ids"].to(device)
+            next_index = record_index + 1
+            if prompt_ids.shape[1] > max_length - max_new_tokens:
+                skipped_long += 1
+                logger.log(event="skip_overlength", epoch=epoch, record_index=record_index)
+                continue
+            samples, rewards = [], []
+            _activate_adapter(model, "default")
+            model.eval()
+            for _ in range(group_size):
+                with torch.no_grad():
+                    generated = model.generate(input_ids=prompt_ids,
+                        attention_mask=torch.ones_like(prompt_ids), do_sample=True,
+                        temperature=temperature, top_p=1.0, top_k=0,
+                        max_new_tokens=max_new_tokens, use_cache=True,
+                        pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+                    # Slice prompt away before decoding; no question/schema in reward text.
+                    response = tokenizer.decode(generated[0, prompt_ids.shape[1]:], skip_special_tokens=True)
+                    old = completion_token_logprobs(model, generated, prompt_ids.shape[1], temperature)
+                    _activate_adapter(model, "reference")
+                    ref = completion_token_logprobs(model, generated, prompt_ids.shape[1], temperature)
+                    _activate_adapter(model, "default")
+                reward = compute_dense_rewards(response, item.get("SQL", item.get("answer", item.get("sql", ""))),
+                    item.get("think_steps", item.get("reasoning", item.get("evidence", ""))), db_path)
+                rewards.append(reward)
+                samples.append((generated.detach().cpu(), old.cpu(), ref.cpu()))
+                del generated, old, ref
+            advantages = normalize_group_advantages([r["total_reward"] for r in rewards])
+            if not any(advantages):
+                skipped_zero += 1
+                logger.log(event="skip_zero_variance", step=step, epoch=epoch,
+                           rewards=[r["total_reward"] for r in rewards])
+            else:
+                model.train()
+                group_loss = 0.0
+                for (ids, old, ref), advantage in zip(samples, advantages):
+                    with torch.autocast(device_type="cuda" if str(device).startswith("cuda") else "cpu",
+                            dtype=torch.float16 if str(device).startswith("cuda") else torch.bfloat16,
+                            enabled=str(device).startswith("cuda")):
+                        new = completion_token_logprobs(model, ids.to(device), prompt_ids.shape[1], temperature)
+                        loss = grpo_token_objective(new, old.to(device), ref.to(device), advantage,
+                                                    clip_eps, beta_kl) / group_size
+                    if not torch.isfinite(loss):
+                        raise FloatingPointError("Nonfinite GRPO objective")
+                    scaler.scale(loss).backward()
+                    group_loss += float(loss.detach())
+                    del new, loss
+                pending += 1
+                logger.log(step=step, epoch=epoch, group_loss=group_loss,
+                    rewards=[r["total_reward"] for r in rewards], advantages=advantages,
+                    **{head: sum(r[head] for r in rewards) / group_size for head in
+                       ("r_format", "r_exec", "r_mem", "r_atomic")})
+            del samples, prompt_ids
+            if pending and (pending == accum or next_index == len(order)):
+                updated = _optimizer_update(parameters, optimizer, scaler, pending)
+                pending = 0
+                if updated:
+                    step += 1
+                logger.log(event="optimizer_update", step=step, optimizer_updated=updated,
+                    peak_vram_bytes=torch.cuda.max_memory_allocated(device) if str(device).startswith("cuda") else 0)
+                if updated and step % save_steps == 0:
+                    checkpoint = save_checkpoint(output_dir, model, optimizer, step, scaler=scaler,
+                        tokenizer=tokenizer, extra=_generation_extra("grpo", fingerprint,
+                            epoch + int(next_index == len(order)), 0 if next_index == len(order) else next_index,
+                            contract=contract))
+                    last_saved_step = step
+        # Flush a partial window even when the last records were overlength/skipped.
+        if pending:
+            if _optimizer_update(parameters, optimizer, scaler, pending):
+                step += 1
+            pending = 0
+        if step >= max_steps:
+            break
+        next_index = len(order)
+    if step != last_saved_step:
+        checkpoint = save_checkpoint(output_dir, model, optimizer, step, scaler=scaler,
+            tokenizer=tokenizer, extra=_generation_extra("grpo", fingerprint,
+                epoch + int(next_index == len(order)), 0 if next_index == len(order) else next_index,
+                            contract=contract))
+    result = dict(status="COMPLETED" if step > 0 else "NO_POLICY_UPDATES", mode="train",
+        trained=step > 0, optimizer_steps=step, checkpoint_path=checkpoint,
+        skipped_zero_variance=skipped_zero, skipped_overlength=skipped_long)
+    logger.log(event="finished", **result)
+    return result
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Dense GRPO Trainer for Text-to-SQL SLMs")
-    parser.add_argument("--model_name_or_path", type=str, default="FINER-SQL-3B")
-    parser.add_argument("--data_path", type=str, default="data/mini/mini_bird.jsonl")
-    parser.add_argument("--db_dir", type=str, default="data/mini")
-    parser.add_argument("--group_size", type=int, default=4, help="Rollouts per question (4, 8, 16)")
-    parser.add_argument("--learning_rate", type=float, default=1e-6)
+    parser = argparse.ArgumentParser(description="Genuine sampled Dense GRPO")
+    parser.add_argument("--model_name_or_path", default="meta-llama/Llama-3.2-3B-Instruct")
+    parser.add_argument("--sft_checkpoint")
+    parser.add_argument("--data_path", default="data/mini/mini_bird.jsonl")
+    parser.add_argument("--db_dir", default="data/mini")
+    parser.add_argument("--output_dir", default="/kaggle/working/grpo_3b")
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--group_size", type=int, default=4)
+    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--learning_rate", type=float, default=5e-6)
     parser.add_argument("--clip_eps", type=float, default=0.2)
     parser.add_argument("--beta_kl", type=float, default=0.04)
-    parser.add_argument("--dry_run", action="store_true", help="Run dry run verification on mini dataset")
+    parser.add_argument("--max_steps", type=int, default=100)
+    parser.add_argument("--max_length", type=int, default=1024)
+    parser.add_argument("--max_new_tokens", type=int, default=128)
+    parser.add_argument("--save_steps", type=int, default=25)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--resume_from_checkpoint")
+    parser.add_argument("--dry_run", action="store_true")
     return parser.parse_args()
 
 
 def main():
-    args = parse_args()
-    if args.dry_run:
-        result = run_dry_run(mini_bird_path=args.data_path, db_dir=args.db_dir, group_size=args.group_size)
-        print(json.dumps(result, indent=2))
-        sys.exit(0)
-
-    logger.info("Executing Dense GRPO Trainer in full mode.")
-    # Fallback to dry run if external model weights are not loaded locally
-    result = run_dry_run(mini_bird_path=args.data_path, db_dir=args.db_dir, group_size=args.group_size)
-    print(json.dumps(result, indent=2))
+    print(json.dumps(run_grpo_training(**vars(parse_args())), indent=2))
 
 
 if __name__ == "__main__":

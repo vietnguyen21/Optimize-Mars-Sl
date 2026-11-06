@@ -7,6 +7,7 @@ execution (max 5 queries per session) with 0 GB VRAM footprint.
 import os
 import re
 import sqlite3
+import time
 from typing import Tuple, Any, Optional, List
 
 
@@ -36,21 +37,10 @@ class DBProbeEngine:
         self.query_count = 0
 
     def _sanitize_and_apply_limit(self, sql: str) -> str:
-        """Ensures query has LIMIT <= self.row_limit without mutating subqueries."""
+        """Cap returned rows without rewriting nested LIMIT or ORDER BY clauses."""
         clean = sql.strip().rstrip(";")
-        upper_sql = clean.upper()
-
-        # Check if query already has a top-level LIMIT
-        limit_match = re.search(r"\bLIMIT\s+(\d+)\b", clean, re.IGNORECASE)
-        if limit_match:
-            existing_limit = int(limit_match.group(1))
-            if existing_limit > self.row_limit:
-                # Replace with capped limit
-                clean = clean[:limit_match.start()] + f"LIMIT {self.row_limit}" + clean[limit_match.end():]
-        else:
-            clean = f"{clean} LIMIT {self.row_limit}"
-
-        return f"{clean};"
+        # Newlines prevent a trailing -- comment from consuming our wrapper.
+        return f"SELECT * FROM (\n{clean}\n) AS _probe_result LIMIT {self.row_limit};"
 
     def probe_sql(self, sql: str, db_path: str) -> Tuple[bool, Any, Optional[str]]:
         """
@@ -82,28 +72,24 @@ class DBProbeEngine:
         # Apply LIMIT <= 5
         probed_sql = self._sanitize_and_apply_limit(clean_sql)
 
+        conn = None
+        self.query_count += 1  # Failed execution attempts also consume probe budget.
         try:
-            # Connect in read-only mode if URI supported, otherwise standard connect with rollback
             conn_uri = f"file:{os.path.abspath(db_path)}?mode=ro"
-            try:
-                conn = sqlite3.connect(conn_uri, uri=True, timeout=self.timeout)
-            except Exception:
-                conn = sqlite3.connect(db_path, timeout=self.timeout)
-
-            cursor = conn.cursor()
-            cursor.execute(probed_sql)
-            rows = cursor.fetchall()
-            conn.close()
-
-            self.query_count += 1
+            conn = sqlite3.connect(conn_uri, uri=True, timeout=self.timeout)
+            conn.execute("PRAGMA query_only = ON")
+            deadline = time.monotonic() + self.timeout
+            conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+            cursor = conn.execute(probed_sql)
+            rows = cursor.fetchmany(self.row_limit)
             return True, rows, None
-
-        except sqlite3.OperationalError as op_err:
-            return False, None, f"SQLite operational error: {str(op_err)}"
         except sqlite3.DatabaseError as db_err:
             return False, None, f"SQLite database error: {str(db_err)}"
         except Exception as err:
             return False, None, f"Execution failed: {str(err)}"
+        finally:
+            if conn is not None:
+                conn.close()
 
 
 # Global default engine instance for module-level convenience function

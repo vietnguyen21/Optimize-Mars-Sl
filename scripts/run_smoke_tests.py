@@ -7,7 +7,7 @@ Executes all 6 validation tiers sequentially without requiring heavy GPU or larg
 3. Suite 3: Colab Training Notebooks (Dynamic cell-by-cell execution of 49 code cells across 5 notebooks)
 4. Suite 4: Grammar PDA & Validation Rules (XGrammar PDA, Fallback Engine, PV-SQL 10 AST rules, DB Probe)
 5. Suite 5: Evaluation & Benchmark Suite (Candidate Generator 8-16 rollouts, Multiset EX, VSR, ECE, Latency)
-6. Suite 6: End-to-End Benchmark Execution on data/mini/mini_bird.jsonl (EX >= 75%, VSR = 100%, ECE <= 0.081, Latency < 5.8s)
+6. Suite 6: End-to-end non-benchmark fixture execution on data/mini/mini_bird.jsonl
 
 Total execution must complete in < 60.0 seconds on standard CPU.
 Returns exit code 0 if all suites pass; non-zero if any test fails.
@@ -19,6 +19,7 @@ import sys
 import time
 import contextlib
 import unittest
+import tempfile
 from typing import Dict, Any, List, Tuple
 
 # Ensure repository root is in sys.path and set current working directory to REPO_ROOT
@@ -49,7 +50,7 @@ def print_banner():
 {TermColors.BOLD}{TermColors.HEADER}    TEXT-TO-SQL SLM ARCHITECTURE — COMPREHENSIVE SMOKE TEST & VERIFICATION SUITE{TermColors.RESET}
 {TermColors.BOLD}{TermColors.CYAN}===================================================================================================={TermColors.RESET}
 {TermColors.DIM}Target Environment: CPU / Local Offline Smoke-Test (Zero GPU/Heavy Model Download Dependency){TermColors.RESET}
-{TermColors.DIM}Quality Thresholds: Total Runtime < 60.0s | 100% Test Pass | EX >= 75.0% | VSR = 100.0% | ECE <= 0.081{TermColors.RESET}
+{TermColors.DIM}Plumbing checks only; smoke fixture scores are not research benchmark results{TermColors.RESET}
 {TermColors.BOLD}{TermColors.CYAN}----------------------------------------------------------------------------------------------------{TermColors.RESET}
 """
     print(banner)
@@ -120,13 +121,16 @@ def run_suite_6_e2e_benchmark(
 ) -> Tuple[bool, int, float, Dict[str, Any], str]:
     """
     Executes Suite 6: Full end-to-end benchmark harness over sample queries in data/mini/mini_bird.jsonl.
-    Validates execution accuracy (EX >= 75%), valid SQL rate (VSR = 100%), ECE (<= 0.081), and latency (< 5.8s).
+    Verifies explicit smoke labeling and artifact/metric plumbing; makes no quality claims.
     """
     start_time = time.perf_counter()
     error_msg = ""
 
     try:
+        run_dir = tempfile.TemporaryDirectory()
         harness = EvaluationHarness(
+            dry_run=True, output_log_dir=os.path.join(run_dir.name, "logs"),
+            output_report_dir=os.path.join(run_dir.name, "reports"),
             db_dir=db_dir,
             num_candidates=8,
             temperature=0.7,
@@ -147,14 +151,11 @@ def run_suite_6_e2e_benchmark(
         failures = []
         if total_queries != 24:
             failures.append(f"Expected 24 queries evaluated, got {total_queries}")
-        if ex < 75.0:
-            failures.append(f"Execution Accuracy (EX) {ex:.2f}% is below target >= 75.0%")
-        if vsr < 99.9:
-            failures.append(f"Valid SQL Rate (VSR) {vsr:.2f}% is below target 100.0%")
-        if ece > 0.081:
-            failures.append(f"Expected Calibration Error (ECE) {ece:.4f} exceeds target <= 0.081")
-        if latency_s >= 5.8:
-            failures.append(f"Average Latency {latency_s:.2f}s exceeds target < 5.8s")
+        if results.get("is_benchmark") or results.get("mode") != "smoke":
+            failures.append("Smoke results must be explicitly marked non-benchmark")
+        if "total_abstentions" not in results:
+            failures.append("Abstention statistics missing")
+        run_dir.cleanup()
 
         if failures:
             return False, total_queries, elapsed, results, "; ".join(failures)
@@ -289,7 +290,7 @@ def main():
             failure_details.append(f"{conf['name']}:\n{err}")
 
     # Run Suite 6: End-to-End Benchmark Execution
-    s6_name = "Suite 6: End-to-End Mini-BIRD Benchmark (24 Queries)"
+    s6_name = "Suite 6: End-to-End Fixture Plumbing (24 Queries)"
     print(f"{TermColors.BOLD}[RUNNING]{TermColors.RESET} {s6_name} on data/mini/mini_bird.jsonl...", flush=True)
     ok_6, count_6, elapsed_6, bench_results, err_6 = run_suite_6_e2e_benchmark(
         dataset_path=os.path.join(REPO_ROOT, "data", "mini", "mini_bird.jsonl"),
@@ -328,7 +329,7 @@ def main():
     # Final verdict
     if not has_failure:
         print(f"{TermColors.BOLD}{TermColors.GREEN}[VERIFICATION SUCCESSFUL]{TermColors.RESET} "
-              f"All 6 suites passed in {total_elapsed:.3f}s (< 60.0s threshold). System is production-ready.")
+              f"All 6 suites passed in {total_elapsed:.3f}s (< 60.0s threshold). CPU plumbing checks passed; GPU training and model quality remain unverified.")
         sys.exit(0)
     else:
         print(f"{TermColors.BOLD}{TermColors.RED}[VERIFICATION FAILED]{TermColors.RESET} One or more test suites failed.")

@@ -1,0 +1,451 @@
+test_boundary_candidates_count (test_evaluation.TestCandidateGenerator.test_boundary_candidates_count) ... ok
+test_generate_16_candidates_ablation (test_evaluation.TestCandidateGenerator.test_generate_16_candidates_ablation) ... ok
+test_generate_8_candidates (test_evaluation.TestCandidateGenerator.test_generate_8_candidates) ... ok
+test_generation_input_schema_contract (test_evaluation.TestCandidateGenerator.test_generation_input_schema_contract) ... ok
+test_notebook_05_convenience_function (test_evaluation.TestCandidateGenerator.test_notebook_05_convenience_function) ... ok
+test_evaluate_end_to_end_functional_api (test_evaluation.TestEvaluationHarness.test_evaluate_end_to_end_functional_api) ... ok
+test_evaluation_harness_execution (test_evaluation.TestEvaluationHarness.test_evaluation_harness_execution) ... ok
+test_evaluation_harness_with_model_path (test_evaluation.TestEvaluationHarness.test_evaluation_harness_with_model_path) ... ok
+test_heldout_gold_changes_cannot_change_prediction (test_evaluation.TestEvaluationHarness.test_heldout_gold_changes_cannot_change_prediction) ... ok
+test_inference_contract_has_no_gold_parameter (test_evaluation.TestEvaluationHarness.test_inference_contract_has_no_gold_parameter) ... ok
+test_package_exports_normalize_query_result (test_evaluation.TestEvaluationHarness.test_package_exports_normalize_query_result) ... ok
+test_real_generation_failure_propagates (test_evaluation.TestEvaluationHarness.test_real_generation_failure_propagates) ... ok
+test_real_generation_requires_model_and_rejects_gold (test_evaluation.TestEvaluationHarness.test_real_generation_requires_model_and_rejects_gold) ... ok
+test_train_eval_overlap_is_rejected (test_evaluation.TestEvaluationHarness.test_train_eval_overlap_is_rejected) ... ok
+test_ece_computation (test_evaluation.TestMetricsComputation.test_ece_computation) ... ok
+test_execution_accuracy (test_evaluation.TestMetricsComputation.test_execution_accuracy) ... ok
+test_execution_is_readonly_and_abstentions_invalid (test_evaluation.TestMetricsComputation.test_execution_is_readonly_and_abstentions_invalid) ... ok
+test_format_benchmark_summary (test_evaluation.TestMetricsComputation.test_format_benchmark_summary) ... ok
+test_latency_statistics (test_evaluation.TestMetricsComputation.test_latency_statistics) ... ok
+test_memory_footprint (test_evaluation.TestMetricsComputation.test_memory_footprint) ... ok
+test_normalize_and_compare_results (test_evaluation.TestMetricsComputation.test_normalize_and_compare_results) ... ok
+test_ordered_gold_preserves_row_order (test_evaluation.TestMetricsComputation.test_ordered_gold_preserves_row_order) ... ok
+test_probe_limits_outer_rows_and_counts_failed_attempts (test_evaluation.TestMetricsComputation.test_probe_limits_outer_rows_and_counts_failed_attempts) ... ok
+test_query_deadline_interrupts_recursive_execution (test_evaluation.TestMetricsComputation.test_query_deadline_interrupts_recursive_execution) ... ok
+test_valid_sql_rate (test_evaluation.TestMetricsComputation.test_valid_sql_rate) ... ok
+test_schema_bos_generated_only_decoding_and_measured_logprob (test_evaluation.TestTensorCandidateGeneration.test_schema_bos_generated_only_decoding_and_measured_logprob)
+Exercise the real tensor generation branch without model downloads. ... skipped 'PyTorch not installed'
+test_equal_rewards_have_exact_zero_advantages (test_generation_training.TestGenerationModes.test_equal_rewards_have_exact_zero_advantages) ... ok
+test_explicit_smoke_is_labeled (test_generation_training.TestGenerationModes.test_explicit_smoke_is_labeled) ... ok
+test_missing_completion_boundary_fails_closed (test_generation_training.TestGenerationModes.test_missing_completion_boundary_fails_closed) ... ok
+test_real_mode_never_falls_back_to_smoke (test_generation_training.TestGenerationModes.test_real_mode_never_falls_back_to_smoke) ... ok
+test_structured_boundary_is_exact (test_generation_training.TestGenerationModes.test_structured_boundary_is_exact) ... ok
+test_native_grpo_reference_export_and_resume (test_generation_training.TestNativeLlamaPeftTraining.test_native_grpo_reference_export_and_resume) ... skipped 'Transformers and PEFT required'
+test_native_sft_checkpoint_resume_at_epoch_boundary (test_generation_training.TestNativeLlamaPeftTraining.test_native_sft_checkpoint_resume_at_epoch_boundary) ... skipped 'Transformers and PEFT required'
+test_grpo_ratio_uses_old_policy_not_reference (test_generation_training.TestTinyGenerationTraining.test_grpo_ratio_uses_old_policy_not_reference) ... skipped 'PyTorch not installed'
+test_grpo_updates_from_sampled_policy_and_resumes (test_generation_training.TestTinyGenerationTraining.test_grpo_updates_from_sampled_policy_and_resumes) ... skipped 'PyTorch not installed'
+test_jepa_detaches_targets (test_generation_training.TestTinyGenerationTraining.test_jepa_detaches_targets) ... skipped 'PyTorch not installed'
+test_padding_masks_attention_not_eos_identity (test_generation_training.TestTinyGenerationTraining.test_padding_masks_attention_not_eos_identity) ... skipped 'PyTorch not installed'
+test_sft_only_saves_no_predictor (test_generation_training.TestTinyGenerationTraining.test_sft_only_saves_no_predictor) ... skipped 'PyTorch not installed'
+test_sft_updates_and_exact_checkpoint_resume (test_generation_training.TestTinyGenerationTraining.test_sft_updates_and_exact_checkpoint_resume) ... skipped 'PyTorch not installed'
+test_probe_blocks_destructive_operations (test_grammar_and_validation.TestDBProbeEngine.test_probe_blocks_destructive_operations) ... ok
+test_probe_module_level_convenience_function (test_grammar_and_validation.TestDBProbeEngine.test_probe_module_level_convenience_function) ... ok
+test_probe_select_applies_limit (test_grammar_and_validation.TestDBProbeEngine.test_probe_select_applies_limit) ... ok
+test_probe_session_quota_throttle (test_grammar_and_validation.TestDBProbeEngine.test_probe_session_quota_throttle) ... ok
+test_factory_get_grammar_engine (test_grammar_and_validation.TestGrammarEngines.test_factory_get_grammar_engine) ... ok
+test_fallback_engine_prefix_validation (test_grammar_and_validation.TestGrammarEngines.test_fallback_engine_prefix_validation) ... ok
+test_fallback_engine_syntax_and_brackets (test_grammar_and_validation.TestGrammarEngines.test_fallback_engine_syntax_and_brackets) ... ok
+test_xgrammar_pda_bitmask_and_logits_filter (test_grammar_and_validation.TestGrammarEngines.test_xgrammar_pda_bitmask_and_logits_filter) ... ok
+test_xgrammar_pda_compilation_and_cache (test_grammar_and_validation.TestGrammarEngines.test_xgrammar_pda_compilation_and_cache) ... ok
+test_adaptive_early_exit_gate (test_grammar_and_validation.TestLayaScorerAndEarlyExit.test_adaptive_early_exit_gate) ... ok
+test_calibrated_scoring_confidence_range (test_grammar_and_validation.TestLayaScorerAndEarlyExit.test_calibrated_scoring_confidence_range) ... ok
+test_parallel_scoring (test_grammar_and_validation.TestLayaScorerAndEarlyExit.test_parallel_scoring) ... ok
+test_full_validation_report (test_grammar_and_validation.TestPVSQL10Rules.test_full_validation_report) ... ok
+test_rule_10_group_by_completeness (test_grammar_and_validation.TestPVSQL10Rules.test_rule_10_group_by_completeness) ... ok
+test_rule_1_distinct (test_grammar_and_validation.TestPVSQL10Rules.test_rule_1_distinct) ... ok
+test_rule_1_distinct_word_boundary (test_grammar_and_validation.TestPVSQL10Rules.test_rule_1_distinct_word_boundary) ... ok
+test_rule_2_top_k (test_grammar_and_validation.TestPVSQL10Rules.test_rule_2_top_k) ... ok
+test_rule_3_average (test_grammar_and_validation.TestPVSQL10Rules.test_rule_3_average) ... ok
+test_rule_4_count (test_grammar_and_validation.TestPVSQL10Rules.test_rule_4_count) ... ok
+test_rule_5_sum (test_grammar_and_validation.TestPVSQL10Rules.test_rule_5_sum) ... ok
+test_rule_6_extreme (test_grammar_and_validation.TestPVSQL10Rules.test_rule_6_extreme) ... ok
+test_rule_7_comparison (test_grammar_and_validation.TestPVSQL10Rules.test_rule_7_comparison) ... ok
+test_rule_8_null_handling (test_grammar_and_validation.TestPVSQL10Rules.test_rule_8_null_handling) ... ok
+test_rule_8_null_handling_where_only_rejected (test_grammar_and_validation.TestPVSQL10Rules.test_rule_8_null_handling_where_only_rejected) ... ok
+test_rule_9_join_validity (test_grammar_and_validation.TestPVSQL10Rules.test_rule_9_join_validity) ... ok
+test_abstention_manager (test_grammar_and_validation.TestSecurityFilterAndAbstention.test_abstention_manager) ... ok
+test_detect_prompt_injection_in_question (test_grammar_and_validation.TestSecurityFilterAndAbstention.test_detect_prompt_injection_in_question) ... ok
+test_detect_stacked_queries_and_dangerous_primitives (test_grammar_and_validation.TestSecurityFilterAndAbstention.test_detect_stacked_queries_and_dangerous_primitives) ... ok
+test_schema_hallucination_detection (test_grammar_and_validation.TestSecurityFilterAndAbstention.test_schema_hallucination_detection) ... ok
+test_validate_candidate_integration (test_grammar_and_validation.TestSecurityFilterAndAbstention.test_validate_candidate_integration) ... ok
+test_data_dict_custom_descriptions (test_grounding.TestColumnCardExtractorStress.test_data_dict_custom_descriptions)
+Tests that external data_dict correctly overrides synthesized column descriptions. ... ok
+test_hostile_column_names_and_nulls (test_grounding.TestColumnCardExtractorStress.test_hostile_column_names_and_nulls)
+Creates an SQLite database containing: ... ok
+test_implicit_foreign_key_inference_from_sqlite (test_grounding.TestColumnCardExtractorStress.test_implicit_foreign_key_inference_from_sqlite)
+Creates SQLite DB without any explicit FOREIGN KEY constraints. ... ok
+test_schema_dict_extraction_robustness (test_grounding.TestColumnCardExtractorStress.test_schema_dict_extraction_robustness)
+Tests extraction from dictionary with missing or malformed entries. ... ok
+test_empty_and_hostile_query_strings (test_grounding.TestLitESQLEmbeddingRetrieverStress.test_empty_and_hostile_query_strings)
+Retriever handles empty strings, whitespace, None, and pure symbols. ... ok
+test_empty_retriever (test_grounding.TestLitESQLEmbeddingRetrieverStress.test_empty_retriever)
+Retriever with 0 cards returns empty tuple gracefully. ... ok
+test_export_offline_index_json (test_grounding.TestLitESQLEmbeddingRetrieverStress.test_export_offline_index_json)
+Tests that export_offline_index produces valid index file. ... ok
+test_extremely_long_query_performance (test_grounding.TestLitESQLEmbeddingRetrieverStress.test_extremely_long_query_performance)
+Query with 10,000 characters completes in < 50ms without recursion or memory issues. ... ok
+test_large_k_greater_than_total_cards (test_grounding.TestLitESQLEmbeddingRetrieverStress.test_large_k_greater_than_total_cards)
+When top_k is larger than available cards, returns all cards without IndexError. ... ok
+test_multi_word_query_and_ranking (test_grounding.TestLitESQLEmbeddingRetrieverStress.test_multi_word_query_and_ranking)
+Retriever ranks relevant tables on multi-word natural queries. ... ok
+test_out_of_vocabulary_query (test_grounding.TestLitESQLEmbeddingRetrieverStress.test_out_of_vocabulary_query)
+Query with unknown words should not crash and still return Top-K cards. ... ok
+test_vietnamese_unicode_query (test_grounding.TestLitESQLEmbeddingRetrieverStress.test_vietnamese_unicode_query)
+Retriever handles non-ASCII unicode natural language query safely. ... ok
+test_execute_all_24_queries_on_sqlite (test_grounding.TestMiniBirdDatabaseQueries.test_execute_all_24_queries_on_sqlite)
+Empirically executes all 24 queries against their respective SQLite databases. ... ok
+test_mini_bird_query_count_and_schema (test_grounding.TestMiniBirdDatabaseQueries.test_mini_bird_query_count_and_schema)
+Verify there are exactly 24 queries with required fields. ... ok
+test_mini_synsql_reasoning_format_and_execution (test_grounding.TestMiniBirdDatabaseQueries.test_mini_synsql_reasoning_format_and_execution)
+Verify mini_synsql.jsonl has 20 valid multi-turn thinking examples and executable SQL. ... ok
+test_boundary_empty_and_single_node_schemas (test_grounding.TestSteinerTreeComplexGraphs.test_boundary_empty_and_single_node_schemas)
+Boundary conditions: ... ok
+test_build_compact_subschema_output_contract (test_grounding.TestSteinerTreeComplexGraphs.test_build_compact_subschema_output_contract)
+Tests that build_compact_subschema generates valid CompactSubSchema contract. ... ok
+test_cycle_topology_and_weights (test_grounding.TestSteinerTreeComplexGraphs.test_cycle_topology_and_weights)
+Cycle graph with unequal path weights. ... ok
+test_deep_chain_10_nodes_recovery (test_grounding.TestSteinerTreeComplexGraphs.test_deep_chain_10_nodes_recovery)
+10-node chain: T0 - T1 - T2 - T3 - T4 - T5 - T6 - T7 - T8 - T9. ... ok
+test_disconnected_components_graceful_handling (test_grounding.TestSteinerTreeComplexGraphs.test_disconnected_components_graceful_handling)
+Graph with two disconnected components: ... ok
+test_duplicate_terminals (test_grounding.TestSteinerTreeComplexGraphs.test_duplicate_terminals)
+Verify duplicate terminal inputs are cleanly deduplicated without error. ... ok
+test_linear_chain_bridge_recovery (test_grounding.TestSteinerTreeComplexGraphs.test_linear_chain_bridge_recovery)
+5-node linear chain: A - B - C - D - E. ... ok
+test_multi_fk_same_table_pair (test_grounding.TestSteinerTreeComplexGraphs.test_multi_fk_same_table_pair)
+Two tables with multiple foreign keys between them: ... ok
+test_multipath_diamond_topology (test_grounding.TestSteinerTreeComplexGraphs.test_multipath_diamond_topology)
+Diamond graph: ... ok
+test_star_topology_central_hub_recovery (test_grounding.TestSteinerTreeComplexGraphs.test_star_topology_central_hub_recovery)
+Star topology: Hub table H connected to spokes S1, S2, S3, S4. ... ok
+test_candidate_builder_rejects_fixture_generator (test_grounding_system1_pipeline.PipelineContracts.test_candidate_builder_rejects_fixture_generator) ... ok
+test_candidate_builder_rejects_missing_rollouts (test_grounding_system1_pipeline.PipelineContracts.test_candidate_builder_rejects_missing_rollouts) ... ok
+test_candidate_label_respects_order (test_grounding_system1_pipeline.PipelineContracts.test_candidate_label_respects_order) ... ok
+test_candidate_labels_come_from_execution (test_grounding_system1_pipeline.PipelineContracts.test_candidate_labels_come_from_execution) ... ok
+test_count_star_does_not_label_all_columns (test_grounding_system1_pipeline.PipelineContracts.test_count_star_does_not_label_all_columns) ... skipped 'sqlglot unavailable'
+test_embedding_requires_recoverable_database_membership (test_grounding_system1_pipeline.PipelineContracts.test_embedding_requires_recoverable_database_membership) ... ok
+test_explicit_embedding_labels_keep_database_negatives (test_grounding_system1_pipeline.PipelineContracts.test_explicit_embedding_labels_keep_database_negatives) ... ok
+test_hn_supcon_keeps_autograd (test_grounding_system1_pipeline.PipelineContracts.test_hn_supcon_keeps_autograd) ... skipped 'torch unavailable'
+test_question_groups_are_disjoint (test_grounding_system1_pipeline.PipelineContracts.test_question_groups_are_disjoint) ... ok
+test_real_decision_never_calls_smoke (test_grounding_system1_pipeline.PipelineContracts.test_real_decision_never_calls_smoke) ... ok
+test_real_embedding_never_calls_smoke (test_grounding_system1_pipeline.PipelineContracts.test_real_embedding_never_calls_smoke) ... ok
+test_real_scorer_requires_checkpoint (test_grounding_system1_pipeline.PipelineContracts.test_real_scorer_requires_checkpoint) ... ok
+test_rlcd_keeps_autograd (test_grounding_system1_pipeline.PipelineContracts.test_rlcd_keeps_autograd) ... skipped 'torch unavailable'
+test_temperature_fits_nll_without_promised_ece (test_grounding_system1_pipeline.PipelineContracts.test_temperature_fits_nll_without_promised_ece) ... ok
+test_decision_optimizer_and_resume (test_grounding_system1_pipeline.TinyAutogradLoops.test_decision_optimizer_and_resume) ... skipped 'torch unavailable'
+test_embedding_optimizer_and_resume (test_grounding_system1_pipeline.TinyAutogradLoops.test_embedding_optimizer_and_resume) ... skipped 'torch unavailable'
+test_native_modernbert_train_score_resume (test_hf_grounding_system1.NativeGroundingSystem1.test_native_modernbert_train_score_resume) ... skipped 'native Hugging Face dependencies unavailable'
+test_native_sentence_transformer_train_export_resume (test_hf_grounding_system1.NativeGroundingSystem1.test_native_sentence_transformer_train_export_resume) ... skipped 'native Hugging Face dependencies unavailable'
+test_data_dict_custom_descriptions (test_m1_stress.TestColumnCardExtractorStress.test_data_dict_custom_descriptions)
+Tests that external data_dict correctly overrides synthesized column descriptions. ... ok
+test_hostile_column_names_and_nulls (test_m1_stress.TestColumnCardExtractorStress.test_hostile_column_names_and_nulls)
+Creates an SQLite database containing: ... ok
+test_implicit_foreign_key_inference_from_sqlite (test_m1_stress.TestColumnCardExtractorStress.test_implicit_foreign_key_inference_from_sqlite)
+Creates SQLite DB without any explicit FOREIGN KEY constraints. ... ok
+test_schema_dict_extraction_robustness (test_m1_stress.TestColumnCardExtractorStress.test_schema_dict_extraction_robustness)
+Tests extraction from dictionary with missing or malformed entries. ... ok
+test_empty_and_hostile_query_strings (test_m1_stress.TestLitESQLEmbeddingRetrieverStress.test_empty_and_hostile_query_strings)
+Retriever handles empty strings, whitespace, None, and pure symbols. ... ok
+test_empty_retriever (test_m1_stress.TestLitESQLEmbeddingRetrieverStress.test_empty_retriever)
+Retriever with 0 cards returns empty tuple gracefully. ... ok
+test_export_offline_index_json (test_m1_stress.TestLitESQLEmbeddingRetrieverStress.test_export_offline_index_json)
+Tests that export_offline_index produces valid index file. ... ok
+test_extremely_long_query_performance (test_m1_stress.TestLitESQLEmbeddingRetrieverStress.test_extremely_long_query_performance)
+Query with 10,000 characters completes in < 50ms without recursion or memory issues. ... ok
+test_large_k_greater_than_total_cards (test_m1_stress.TestLitESQLEmbeddingRetrieverStress.test_large_k_greater_than_total_cards)
+When top_k is larger than available cards, returns all cards without IndexError. ... ok
+test_multi_word_query_and_ranking (test_m1_stress.TestLitESQLEmbeddingRetrieverStress.test_multi_word_query_and_ranking)
+Retriever ranks relevant tables on multi-word natural queries. ... ok
+test_out_of_vocabulary_query (test_m1_stress.TestLitESQLEmbeddingRetrieverStress.test_out_of_vocabulary_query)
+Query with unknown words should not crash and still return Top-K cards. ... ok
+test_vietnamese_unicode_query (test_m1_stress.TestLitESQLEmbeddingRetrieverStress.test_vietnamese_unicode_query)
+Retriever handles non-ASCII unicode natural language query safely. ... ok
+test_execute_all_24_queries_on_sqlite (test_m1_stress.TestMiniBirdDatabaseQueries.test_execute_all_24_queries_on_sqlite)
+Empirically executes all 24 queries against their respective SQLite databases. ... ok
+test_mini_bird_query_count_and_schema (test_m1_stress.TestMiniBirdDatabaseQueries.test_mini_bird_query_count_and_schema)
+Verify there are exactly 24 queries with required fields. ... ok
+test_mini_synsql_reasoning_format_and_execution (test_m1_stress.TestMiniBirdDatabaseQueries.test_mini_synsql_reasoning_format_and_execution)
+Verify mini_synsql.jsonl has 20 valid multi-turn thinking examples and executable SQL. ... ok
+test_boundary_empty_and_single_node_schemas (test_m1_stress.TestSteinerTreeComplexGraphs.test_boundary_empty_and_single_node_schemas)
+Boundary conditions: ... ok
+test_build_compact_subschema_output_contract (test_m1_stress.TestSteinerTreeComplexGraphs.test_build_compact_subschema_output_contract)
+Tests that build_compact_subschema generates valid CompactSubSchema contract. ... ok
+test_cycle_topology_and_weights (test_m1_stress.TestSteinerTreeComplexGraphs.test_cycle_topology_and_weights)
+Cycle graph with unequal path weights. ... ok
+test_deep_chain_10_nodes_recovery (test_m1_stress.TestSteinerTreeComplexGraphs.test_deep_chain_10_nodes_recovery)
+10-node chain: T0 - T1 - T2 - T3 - T4 - T5 - T6 - T7 - T8 - T9. ... ok
+test_disconnected_components_graceful_handling (test_m1_stress.TestSteinerTreeComplexGraphs.test_disconnected_components_graceful_handling)
+Graph with two disconnected components: ... ok
+test_duplicate_terminals (test_m1_stress.TestSteinerTreeComplexGraphs.test_duplicate_terminals)
+Verify duplicate terminal inputs are cleanly deduplicated without error. ... ok
+test_linear_chain_bridge_recovery (test_m1_stress.TestSteinerTreeComplexGraphs.test_linear_chain_bridge_recovery)
+5-node linear chain: A - B - C - D - E. ... ok
+test_multi_fk_same_table_pair (test_m1_stress.TestSteinerTreeComplexGraphs.test_multi_fk_same_table_pair)
+Two tables with multiple foreign keys between them: ... ok
+test_multipath_diamond_topology (test_m1_stress.TestSteinerTreeComplexGraphs.test_multipath_diamond_topology)
+Diamond graph: ... ok
+test_star_topology_central_hub_recovery (test_m1_stress.TestSteinerTreeComplexGraphs.test_star_topology_central_hub_recovery)
+Star topology: Hub table H connected to spokes S1, S2, S3, S4. ... ok
+test_empty_prompt_boundary (test_m2_stress.TestCompletionLossStress.test_empty_prompt_boundary)
+Sequence starts immediately with <think> token (0 prompt tokens). ... ok
+test_large_sequence_boundary_4096 (test_m2_stress.TestCompletionLossStress.test_large_sequence_boundary_4096)
+Verify performance and numerical stability on 4096-token sequences. ... ok
+test_missing_think_token_boundary (test_m2_stress.TestCompletionLossStress.test_missing_think_token_boundary)
+Sequence with no think token at all. ... ok
+test_strict_prompt_invariance_empirical (test_m2_stress.TestCompletionLossStress.test_strict_prompt_invariance_empirical)
+Prove empirically that altering prompt/DDL tokens produces 0.0 change ... ok
+test_think_token_at_extreme_boundaries (test_m2_stress.TestCompletionLossStress.test_think_token_at_extreme_boundaries)
+Boundary sequence lengths: len=0, len=1, think token at the very end. ... ok
+test_atomic_reward_edge_cases (test_m2_stress.TestDenseGRPORewardsAndAdvantageCollapse.test_atomic_reward_edge_cases)
+Test atomic reward under empty queries, corrupt whitespace, and complex clauses. ... ok
+test_destructive_sql_injection_defense (test_m2_stress.TestDenseGRPORewardsAndAdvantageCollapse.test_destructive_sql_injection_defense)
+Verify that destructive SQL statements (DROP, DELETE, UPDATE, ALTER, INSERT) ... ok
+test_hostile_all_identical_rollouts_division_by_zero_safety (test_m2_stress.TestDenseGRPORewardsAndAdvantageCollapse.test_hostile_all_identical_rollouts_division_by_zero_safety)
+Hostile Scenario: All 4 rollouts are completely identical. ... ok
+test_hostile_all_rollouts_fail_execution_resilience (test_m2_stress.TestDenseGRPORewardsAndAdvantageCollapse.test_hostile_all_rollouts_fail_execution_resilience)
+Hostile Scenario: 100% of candidate rollouts fail execution (R_exec == 0.0). ... ok
+test_checkpoint_pruning_with_auxiliary_directories (test_m2_stress.TestDriveCheckpointCallbackStress.test_checkpoint_pruning_with_auxiliary_directories)
+Ensure pruning: ... 2026-11-06 22:09:53,964 [INFO] [DriveSync] Initialized callback with target Drive directory: /tmp/tmp5l_5dy5m/google_drive
+2026-11-06 22:09:53,965 [INFO] [DriveSync] ✅ Synchronized 'checkpoint-10' to Drive (1 files, 0.00 MB)
+2026-11-06 22:09:53,965 [INFO] Checkpoint retention is non-destructive; no files pruned.
+2026-11-06 22:09:53,965 [INFO] [DriveSync] ✅ Synchronized 'checkpoint-20' to Drive (1 files, 0.00 MB)
+2026-11-06 22:09:53,965 [INFO] Checkpoint retention is non-destructive; no files pruned.
+2026-11-06 22:09:53,965 [INFO] [DriveSync] ✅ Synchronized 'checkpoint-30' to Drive (1 files, 0.00 MB)
+2026-11-06 22:09:53,965 [INFO] Checkpoint retention is non-destructive; no files pruned.
+2026-11-06 22:09:53,966 [INFO] [DriveSync] ✅ Synchronized 'checkpoint-40' to Drive (1 files, 0.00 MB)
+2026-11-06 22:09:53,966 [INFO] Checkpoint retention is non-destructive; no files pruned.
+ok
+test_colab_session_crash_recovery_from_drive (test_m2_stress.TestDriveCheckpointCallbackStress.test_colab_session_crash_recovery_from_drive)
+Simulate Google Colab session crash: ... 2026-11-06 22:09:53,966 [INFO] [DriveSync] Initialized callback with target Drive directory: /tmp/tmp54krtfd5/google_drive
+2026-11-06 22:09:53,967 [INFO] [DriveSync] ✅ Synchronized 'checkpoint-100' to Drive (2 files, 0.00 MB)
+2026-11-06 22:09:53,967 [INFO] Checkpoint retention is non-destructive; no files pruned.
+2026-11-06 22:09:53,967 [INFO] [DriveSync] ✅ Synchronized 'checkpoint-200' to Drive (2 files, 0.00 MB)
+2026-11-06 22:09:53,967 [INFO] Checkpoint retention is non-destructive; no files pruned.
+2026-11-06 22:09:53,968 [INFO] [DriveSync] ✅ Synchronized 'checkpoint-300' to Drive (2 files, 0.00 MB)
+2026-11-06 22:09:53,968 [INFO] Checkpoint retention is non-destructive; no files pruned.
+2026-11-06 22:09:53,968 [INFO] [SessionRecovery] Found latest checkpoint in Drive: /tmp/tmp54krtfd5/google_drive/checkpoint-300
+ok
+test_perfect_and_worst_case_ece (test_m2_stress.TestECECalibrationStress.test_perfect_and_worst_case_ece)
+Boundary properties of ECE: perfect calibration (0.0) vs total miscalibration (1.0). ... ok
+test_temperature_grid_search_bound_finding (test_m2_stress.TestECECalibrationStress.test_temperature_grid_search_bound_finding)
+EMPIRICAL CHALLENGE FINDING: ... ok
+test_temperature_scaling_achieves_target_ece_on_moderate_overconfidence (test_m2_stress.TestECECalibrationStress.test_temperature_scaling_achieves_target_ece_on_moderate_overconfidence)
+Verify Temperature Scaling achieves ECE <= 0.081 on realistic overconfident logits. ... ok
+test_block1_strictly_cannot_attend_block2 (test_m2_stress.TestLLMJEPAStress.test_block1_strictly_cannot_attend_block2)
+Verify that for all (i, j) where i < T (Block 1) and j >= T (Block 2), ... ok
+test_causal_mask_submatrix_properties (test_m2_stress.TestLLMJEPAStress.test_causal_mask_submatrix_properties)
+Verify the exact 4-quadrant attention dynamics. ... ok
+test_cosine_distance_boundary_conditions (test_m2_stress.TestLLMJEPAStress.test_cosine_distance_boundary_conditions)
+Stress-test cosine distance under extreme vector orientations and magnitudes. ... ok
+test_random_loss_dropout_distribution_and_seeds (test_m2_stress.TestLLMJEPAStress.test_random_loss_dropout_distribution_and_seeds)
+Verify that Random Loss Dropout (LD = 0.5) follows binomial distribution ... ok
+test_ast_parse_every_code_cell (test_m3_stress.TestM3StressSuite.test_ast_parse_every_code_cell)
+Parse 100% of code cells with ast.parse to detect syntax errors or invalid escapes. ... ok
+test_checkpoint_recovery_edge_cases (test_m3_stress.TestM3StressSuite.test_checkpoint_recovery_edge_cases)
+Adversarial edge cases for find_latest_checkpoint and get_resume_checkpoint: ... ok
+test_extract_and_audit_all_imports (test_m3_stress.TestM3StressSuite.test_extract_and_audit_all_imports)
+Adversarially extract all imports from all code cells and test symbol availability. ... ok
+test_json_structure_and_nbformat_v4 (test_m3_stress.TestM3StressSuite.test_json_structure_and_nbformat_v4)
+Verify all 5 notebooks are valid JSON and conform to nbformat v4. ... ok
+test_kaggle_bootstrap_without_colab (test_m3_stress.TestM3StressSuite.test_kaggle_bootstrap_without_colab) ... ok
+test_notebook_03_explicit_sft_handoff_and_bounded_rollouts (test_m3_stress.TestM3StressSuite.test_notebook_03_explicit_sft_handoff_and_bounded_rollouts) ... ok
+test_notebook_03_hardware_tier_switch_logic (test_m3_stress.TestM3StressSuite.test_notebook_03_hardware_tier_switch_logic)
+Verify that hardware tier selection logic maps correctly across all VRAM levels: ... ok
+test_resume_from_checkpoint_precedence (test_m3_stress.TestM3StressSuite.test_resume_from_checkpoint_precedence)
+Verify get_resume_checkpoint behavior when 'latest' is requested: ... 2026-11-06 22:09:54,097 [INFO] [SessionRecovery] Found latest checkpoint in Drive: /tmp/tmpk09qrtrx/drive/checkpoint-50
+2026-11-06 22:09:54,097 [INFO] [SessionRecovery] Found latest checkpoint in local storage: /tmp/tmpk09qrtrx/local/checkpoint-100
+ok
+test_all_notebooks_execute_in_explicit_smoke_mode (test_notebooks.TestNotebooksIntegrity.test_all_notebooks_execute_in_explicit_smoke_mode) ... 2026-11-06 22:09:54,210 [INFO] [DryRun] Starting LitE-SQL HN-SupCon verification using '/tmp/tmpnbr463q7/smoke/grounding/column_cards.jsonl'...
+2026-11-06 22:09:54,210 [INFO] [DryRun] Loaded 40 column cards.
+2026-11-06 22:09:54,212 [INFO] [DryRun] Computed HN-SupCon loss over 5 queries. Average Loss: 3.7084
+2026-11-06 22:09:54,213 [INFO] [Export] Saved offline column index as NumPy matrix to /tmp/tmpnbr463q7/smoke/grounding/offline_column_index.npy (shape: (40, 64))
+2026-11-06 22:09:54,213 [INFO] [DryRun] ✅ Column cards indexing verified. Output saved.
+2026-11-06 22:09:54,284 [INFO] [DryRun] Starting SFT Completion-Only verification using '/home/lht/Projects/Optimize-Mars-Sl/data/mini/mini_synsql.jsonl'...
+2026-11-06 22:09:54,284 [INFO] [DryRun] Loaded 20 samples from /home/lht/Projects/Optimize-Mars-Sl/data/mini/mini_synsql.jsonl
+2026-11-06 22:09:54,433 [INFO] [DryRun] ✅ Verified 5 samples. Avg Completion Loss: 5.7144, Valid tokens: 2124
+2026-11-06 22:09:54,433 [INFO] [DryRun] ✅ LoRA config verified: rank=512, targets=['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+2026-11-06 22:09:54,504 [INFO] [DryRun] Starting Dense GRPO verification using '/home/lht/Projects/Optimize-Mars-Sl/data/mini/mini_bird.jsonl'...
+2026-11-06 22:09:54,504 [INFO] [DryRun] Loaded 24 queries for GRPO testing.
+2026-11-06 22:09:54,507 [INFO] [DryRun] Query 1 (financial_mini): Rewards=[4.5333, 1.9, 1.4, 0.0], Advantages=[1.5684847538854705, -0.03552728600097865, -0.34009038930984004, -1.1928670785746518], GRPO Loss=0.0002
+2026-11-06 22:09:54,508 [INFO] [DryRun] Query 2 (financial_mini): Rewards=[4.75, 1.9, 1.4, 0.0], Advantages=[1.5850018501715262, -0.0651370623358163, -0.35463511716166585, -1.1652296706740446], GRPO Loss=0.0002
+2026-11-06 22:09:54,510 [INFO] [DryRun] Query 3 (financial_mini): Rewards=[4.5333, 1.9, 1.4, 0.0], Advantages=[1.5684847538854705, -0.03552728600097865, -0.34009038930984004, -1.1928670785746518], GRPO Loss=0.0002
+2026-11-06 22:09:54,510 [INFO] [DryRun] ✅ Verified 3 queries. Advantage collapse successfully prevented across all groups.
+2026-11-06 22:09:54,586 [INFO] [DryRun] Starting Laya-421M RLCD decision model verification...
+2026-11-06 22:09:54,586 [INFO] [DryRun] ✅ Dual LR verified: Backbone=1e-05, Head=0.0001
+2026-11-06 22:09:54,587 [INFO] [DryRun] Initial RLCD Loss: 0.1787, Initial ECE: 0.1505
+2026-11-06 22:09:54,599 [INFO] [DryRun] Optimal Temperature: 0.05, Calibrated ECE: 0.0000 (Target <= 0.081)
+2026-11-06 22:09:54,599 [INFO] [DryRun] ✅ RLCD calibration and dual LR training successfully verified.
+ok
+test_five_valid_notebooks_and_syntax (test_notebooks.TestNotebooksIntegrity.test_five_valid_notebooks_and_syntax) ... ok
+test_internal_imports_resolve (test_notebooks.TestNotebooksIntegrity.test_internal_imports_resolve) ... ok
+test_no_notebook_local_oracle_or_colab_mount (test_notebooks.TestNotebooksIntegrity.test_no_notebook_local_oracle_or_colab_mount) ... ok
+test_checkpoint_restores_parameters_optimizer_and_rng (test_runtime.TestRuntime.test_checkpoint_restores_parameters_optimizer_and_rng) ... skipped 'PyTorch is not installed'
+test_db_resolution_nested_and_no_escape (test_runtime.TestRuntime.test_db_resolution_nested_and_no_escape) ... ok
+test_interrupted_save_does_not_block_retry (test_runtime.TestRuntime.test_interrupted_save_does_not_block_retry) ... skipped 'PyTorch is not installed'
+test_load_json_and_jsonl_and_reject_empty (test_runtime.TestRuntime.test_load_json_and_jsonl_and_reject_empty) ... ok
+test_log_and_checkpoint_discovery_ignore_incomplete (test_runtime.TestRuntime.test_log_and_checkpoint_discovery_ignore_incomplete) ... ok
+test_mode_is_explicit_and_outputs_separated (test_runtime.TestRuntime.test_mode_is_explicit_and_outputs_separated) ... ok
+test_completion_loss_invariance_to_prompt_tokens (test_training.TestCompletionOnlySFT.test_completion_loss_invariance_to_prompt_tokens) ... ok
+test_lora_config_generation (test_training.TestCompletionOnlySFT.test_lora_config_generation) ... ok
+test_mask_prompt_tokens (test_training.TestCompletionOnlySFT.test_mask_prompt_tokens) ... ok
+test_sft_dry_run_execution (test_training.TestCompletionOnlySFT.test_sft_dry_run_execution) ... 2026-11-06 22:09:54,753 [INFO] [DryRun] Starting SFT Completion-Only verification using 'data/mini/mini_synsql.jsonl'...
+2026-11-06 22:09:54,753 [INFO] [DryRun] Loaded 20 samples from data/mini/mini_synsql.jsonl
+2026-11-06 22:09:54,926 [INFO] [DryRun] ✅ Verified 5 samples. Avg Completion Loss: 5.7144, Valid tokens: 2124
+2026-11-06 22:09:54,926 [INFO] [DryRun] ✅ LoRA config verified: rank=512, targets=['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+ok
+test_decision_dry_run_execution (test_training.TestDecisionModelTrainer.test_decision_dry_run_execution) ... 2026-11-06 22:09:54,930 [INFO] [DryRun] Starting Laya-421M RLCD decision model verification...
+2026-11-06 22:09:54,930 [INFO] [DryRun] ✅ Dual LR verified: Backbone=1e-05, Head=0.0001
+2026-11-06 22:09:54,931 [INFO] [DryRun] Initial RLCD Loss: 0.1787, Initial ECE: 0.1505
+2026-11-06 22:09:54,942 [INFO] [DryRun] Optimal Temperature: 0.05, Calibrated ECE: 0.0000 (Target <= 0.081)
+2026-11-06 22:09:54,942 [INFO] [DryRun] ✅ RLCD calibration and dual LR training successfully verified.
+ok
+test_dual_lr_optimizer_grouping (test_training.TestDecisionModelTrainer.test_dual_lr_optimizer_grouping) ... ok
+test_ece_computation_and_temperature_calibration (test_training.TestDecisionModelTrainer.test_ece_computation_and_temperature_calibration) ... ok
+test_rlcd_loss_penalizes_overconfidence (test_training.TestDecisionModelTrainer.test_rlcd_loss_penalizes_overconfidence) ... ok
+test_atomic_reward (test_training.TestDenseGRPOTrainer.test_atomic_reward) ... ok
+test_exec_reward_on_real_sqlite (test_training.TestDenseGRPOTrainer.test_exec_reward_on_real_sqlite) ... ok
+test_format_reward (test_training.TestDenseGRPOTrainer.test_format_reward) ... ok
+test_group_advantage_normalization_and_collapse_prevention (test_training.TestDenseGRPOTrainer.test_group_advantage_normalization_and_collapse_prevention) ... ok
+test_grpo_dry_run_execution (test_training.TestDenseGRPOTrainer.test_grpo_dry_run_execution) ... 2026-11-06 22:09:54,947 [INFO] [DryRun] Starting Dense GRPO verification using 'data/mini/mini_bird.jsonl'...
+2026-11-06 22:09:54,948 [INFO] [DryRun] Loaded 24 queries for GRPO testing.
+2026-11-06 22:09:54,950 [INFO] [DryRun] Query 1 (financial_mini): Rewards=[4.5333, 1.9, 1.4, 0.0], Advantages=[1.5684847538854705, -0.03552728600097865, -0.34009038930984004, -1.1928670785746518], GRPO Loss=0.0002
+2026-11-06 22:09:54,953 [INFO] [DryRun] Query 2 (financial_mini): Rewards=[4.75, 1.9, 1.4, 0.0], Advantages=[1.5850018501715262, -0.0651370623358163, -0.35463511716166585, -1.1652296706740446], GRPO Loss=0.0002
+2026-11-06 22:09:54,955 [INFO] [DryRun] Query 3 (financial_mini): Rewards=[4.5333, 1.9, 1.4, 0.0], Advantages=[1.5684847538854705, -0.03552728600097865, -0.34009038930984004, -1.1928670785746518], GRPO Loss=0.0002
+2026-11-06 22:09:54,955 [INFO] [DryRun] ✅ Verified 3 queries. Advantage collapse successfully prevented across all groups.
+ok
+test_mem_reward (test_training.TestDenseGRPOTrainer.test_mem_reward) ... ok
+test_checkpoint_pruning_on_drive (test_training.TestDriveCheckpointCallback.test_checkpoint_pruning_on_drive) ... 2026-11-06 22:09:54,956 [INFO] [DriveSync] Initialized callback with target Drive directory: /tmp/tmprrpr8anb/drive_checkpoints
+2026-11-06 22:09:54,956 [INFO] [DriveSync] ✅ Synchronized 'checkpoint-100' to Drive (1 files, 0.00 MB)
+2026-11-06 22:09:54,957 [INFO] Checkpoint retention is non-destructive; no files pruned.
+2026-11-06 22:09:54,957 [INFO] [DriveSync] ✅ Synchronized 'checkpoint-200' to Drive (1 files, 0.00 MB)
+2026-11-06 22:09:54,957 [INFO] Checkpoint retention is non-destructive; no files pruned.
+2026-11-06 22:09:54,957 [INFO] [DriveSync] ✅ Synchronized 'checkpoint-300' to Drive (1 files, 0.00 MB)
+2026-11-06 22:09:54,957 [INFO] Checkpoint retention is non-destructive; no files pruned.
+ok
+test_drive_sync_on_save (test_training.TestDriveCheckpointCallback.test_drive_sync_on_save) ... 2026-11-06 22:09:54,958 [INFO] [DriveSync] Initialized callback with target Drive directory: /tmp/tmp50c223zw/drive_checkpoints
+2026-11-06 22:09:54,958 [INFO] [DriveSync] ✅ Synchronized 'checkpoint-1000' to Drive (1 files, 0.00 MB)
+2026-11-06 22:09:54,958 [INFO] Checkpoint retention is non-destructive; no files pruned.
+ok
+test_find_latest_checkpoint (test_training.TestDriveCheckpointCallback.test_find_latest_checkpoint) ... ok
+test_get_resume_checkpoint (test_training.TestDriveCheckpointCallback.test_get_resume_checkpoint) ... 2026-11-06 22:09:54,959 [INFO] [SessionRecovery] Found latest checkpoint in Drive: /tmp/tmpplcuyxe_/drive_checkpoints/checkpoint-2000
+ok
+test_2block_causal_mask_structure (test_training.TestLLM_JEPAModule.test_2block_causal_mask_structure) ... ok
+test_cosine_distance_computation (test_training.TestLLM_JEPAModule.test_cosine_distance_computation) ... ok
+test_jepa_module_forward_and_dropout (test_training.TestLLM_JEPAModule.test_jepa_module_forward_and_dropout) ... ok
+test_embedding_dry_run_execution (test_training.TestLitESQLEmbeddingTrainer.test_embedding_dry_run_execution) ... 2026-11-06 22:09:54,959 [INFO] [DryRun] Starting LitE-SQL HN-SupCon verification using 'data/mini/column_cards_mini.jsonl'...
+2026-11-06 22:09:54,960 [INFO] [DryRun] Loaded 40 column cards.
+2026-11-06 22:09:54,962 [INFO] [DryRun] Computed HN-SupCon loss over 5 queries. Average Loss: 3.6298
+2026-11-06 22:09:54,963 [INFO] [Export] Saved offline column index as NumPy matrix to /tmp/tmp485g7jnc/offline_column_index.npy (shape: (40, 64))
+2026-11-06 22:09:54,963 [INFO] [DryRun] ✅ Column cards indexing verified. Output saved.
+ok
+test_format_column_card_text (test_training.TestLitESQLEmbeddingTrainer.test_format_column_card_text) ... ok
+test_hn_supcon_margin_effect (test_training.TestLitESQLEmbeddingTrainer.test_hn_supcon_margin_effect) ... ok
+
+----------------------------------------------------------------------
+Ran 197 tests in 1.246s
+
+OK (skipped=18)
+{'mode': 'smoke (NOT a benchmark)', 'data': '/home/lht/Projects/Optimize-Mars-Sl/data/mini', 'device': 'cuda:0'}
+{'mode': 'smoke (NOT a benchmark)', 'data': '/home/lht/Projects/Optimize-Mars-Sl/data/mini', 'device': 'cuda:0'}
+{'mode': 'smoke (NOT a benchmark)', 'data': '/home/lht/Projects/Optimize-Mars-Sl/data/mini', 'device': 'cuda:0'}
+{'mode': 'smoke (NOT a benchmark)', 'data': '/home/lht/Projects/Optimize-Mars-Sl/data/mini', 'device': 'cuda:0'}
+{'mode': 'smoke (NOT a benchmark)', 'data': '/home/lht/Projects/Optimize-Mars-Sl/data/mini', 'device': 'cuda:0'}
+{'mode': 'smoke (NOT a benchmark)', 'data': '/home/lht/Projects/Optimize-Mars-Sl/data/mini', 'device': 'cpu'}
+{'output': '/tmp/tmpnbr463q7/smoke/grounding', 'resume_from_checkpoint': None, 'gpus': []}
+{
+  "status": "PASSED",
+  "margin": 0.1,
+  "temperature": 0.05,
+  "avg_loss": 3.7084059710161483,
+  "indexed_columns": 40,
+  "exported_index": {
+    "meta": "/tmp/tmpnbr463q7/smoke/grounding/column_index_meta.json",
+    "index": "/tmp/tmpnbr463q7/smoke/grounding/offline_column_index.npy"
+  },
+  "mode": "smoke",
+  "trained": false
+}
+{'mode': 'smoke (NOT a benchmark)', 'data': '/home/lht/Projects/Optimize-Mars-Sl/data/mini', 'device': 'cpu'}
+{'output': '/tmp/tmpx82v31qq/smoke/sft_jepa_3b', 'resume_from_checkpoint': None, 'gpus': []}
+{
+  "status": "PASSED",
+  "verified_samples": 5,
+  "avg_loss": 5.714415624988495,
+  "total_valid_tokens": 2124,
+  "lora_rank": 512,
+  "completion_masking_verified": true,
+  "mode": "smoke",
+  "trained": false
+}
+{'mode': 'smoke (NOT a benchmark)', 'data': '/home/lht/Projects/Optimize-Mars-Sl/data/mini', 'device': 'cpu'}
+{'output': '/tmp/tmpu6lxgvlj/smoke/grpo_3b', 'resume_from_checkpoint': None, 'gpus': []}
+{
+  "status": "PASSED",
+  "verified_queries": 3,
+  "group_size": 2,
+  "advantage_collapse_prevented": true,
+  "reward_heads": [
+    "r_format",
+    "r_exec",
+    "r_mem",
+    "r_atomic"
+  ],
+  "mode": "smoke",
+  "trained": false
+}
+{'mode': 'smoke (NOT a benchmark)', 'data': '/home/lht/Projects/Optimize-Mars-Sl/data/mini', 'device': 'cpu'}
+{'output': '/tmp/tmpf43oto05/smoke/system1', 'resume_from_checkpoint': None, 'gpus': []}
+{
+  "status": "PASSED",
+  "dual_lr": {
+    "backbone": 1e-05,
+    "head": 0.0001
+  },
+  "initial_ece": 0.1505,
+  "calibrated_ece": 0.0,
+  "target_ece": 0.081,
+  "optimal_temperature": 0.049787068367863944,
+  "ece_passed": true,
+  "mode": "smoke",
+  "trained": false
+}
+{'mode': 'smoke (NOT a benchmark)', 'data': '/home/lht/Projects/Optimize-Mars-Sl/data/mini', 'device': 'cpu'}
+{'output': '/tmp/tmp4bkj1sbn/smoke/evaluation', 'resume_from_checkpoint': None, 'gpus': []}
+{
+  "dataset": "mini_bird.jsonl",
+  "dataset_sha256": "90c101995cc63535970ab86f7edb75b30fade733e872ff436c4b9bffc9f46da4",
+  "mode": "smoke",
+  "is_benchmark": false,
+  "checkpoint": null,
+  "decision_checkpoint": null,
+  "grounding_checkpoint": null,
+  "grounding_mode": "lexical_ablation",
+  "constraint_mode": "posthoc",
+  "grammar_enforced_during_generation": false,
+  "grammar_scope": "SQLite SELECT subset; AST and execution checks still required",
+  "seed": 42,
+  "training_overlap_checked": false,
+  "total_queries": 24,
+  "execution_accuracy": 0.0,
+  "valid_sql_rate": 0.0,
+  "ece": 0.0,
+  "accepted_ece": null,
+  "latency": {
+    "mean_ms": 2.23,
+    "median_ms": 1.99,
+    "p95_ms": 4.14,
+    "p99_ms": 4.79,
+    "total_s": 0.05
+  },
+  "memory": {
+    "ram_mb": 58.89,
+    "gpu_vram_mb": 0.0,
+    "gpu_peak_allocated_mb_by_device": {},
+    "vram_gb": 0.0
+  },
+  "early_exit_count": 0,
+  "early_exit_rate_pct": 0.0,
+  "total_abstentions": 24,
+  "abstention_rate_pct": 100.0,
+  "coverage_pct": 0.0
+}

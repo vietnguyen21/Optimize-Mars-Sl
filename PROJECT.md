@@ -1,3 +1,5 @@
+> **Kaggle pipeline correction:** Historical completion and benchmark claims below describe the earlier scaffold and are not evidence of trained-model performance. See [KAGGLE.md](KAGGLE.md) for the current real/smoke distinction, artifact contracts, reproducibility and validation limits. Full Kaggle GPU training has not been validated.
+
 # Project: Text-to-SQL SLM Research Architecture (Director-Led SSoT)
 ## puppyvn :>
 ## Architecture

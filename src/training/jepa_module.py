@@ -219,13 +219,18 @@ if TORCH_AVAILABLE:
                 if random.random() < self.loss_dropout:
                     is_dropped = True
 
+            if not isinstance(pred_latent, torch.Tensor):
+                pred_latent = torch.as_tensor(pred_latent, dtype=next(self.predictor.parameters()).dtype,
+                                               device=next(self.predictor.parameters()).device)
+            if not isinstance(target_latent, torch.Tensor):
+                target_latent = torch.as_tensor(target_latent, dtype=pred_latent.dtype, device=pred_latent.device)
             predicted_target = self.predictor(pred_latent)
-            cos_dist = compute_cosine_distance(predicted_target, target_latent)
+            cos_dist = compute_cosine_distance(predicted_target, target_latent.detach())
             mean_dist = cos_dist.mean()
 
             if is_dropped:
                 # Return zero loss detached or zero tensor with grad requirement
-                jepa_loss = torch.tensor(0.0, device=pred_latent.device, dtype=pred_latent.dtype)
+                jepa_loss = predicted_target.sum() * 0.0
             else:
                 jepa_loss = self.lambda_weight * mean_dist
 

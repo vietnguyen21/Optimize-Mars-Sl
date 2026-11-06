@@ -134,9 +134,9 @@ class TestDriveCheckpointCallback(unittest.TestCase):
             state = TrainerState(global_step=step)
             cb.on_save(args, state, control=None)
 
-        # Drive should only keep the 2 most recent: 200 and 300
+        # Research checkpoints are retained even when a legacy retention count is set.
         drive_checkpoints = os.listdir(self.drive_dir)
-        self.assertNotIn("checkpoint-100", drive_checkpoints)
+        self.assertIn("checkpoint-100", drive_checkpoints)
         self.assertIn("checkpoint-200", drive_checkpoints)
         self.assertIn("checkpoint-300", drive_checkpoints)
 
@@ -263,9 +263,9 @@ class TestCompletionOnlySFT(unittest.TestCase):
 
     def test_lora_config_generation(self):
         cfg = build_lora_config(rank=256, alpha=16)
-        r = getattr(cfg, "r", cfg.get("r"))
-        alpha = getattr(cfg, "lora_alpha", cfg.get("lora_alpha"))
-        targets = getattr(cfg, "target_modules", cfg.get("target_modules"))
+        r = cfg.r
+        alpha = cfg.lora_alpha
+        targets = cfg.target_modules
 
         self.assertEqual(r, 256)
         self.assertEqual(alpha, 16)
@@ -377,11 +377,12 @@ class TestLitESQLEmbeddingTrainer(unittest.TestCase):
         self.assertIn("PRIMARY KEY", text)
 
     def test_embedding_dry_run_execution(self):
-        res = run_embedding_dry_run(
-            cards_path="data/mini/column_cards_mini.jsonl",
-            bird_path="data/mini/mini_bird.jsonl",
-            output_dir="data/mini"
-        )
+        with tempfile.TemporaryDirectory() as output:
+            res = run_embedding_dry_run(
+                cards_path="data/mini/column_cards_mini.jsonl",
+                bird_path="data/mini/mini_bird.jsonl",
+                output_dir=output
+            )
         self.assertEqual(res["status"], "PASSED")
         self.assertEqual(res["margin"], 0.1)
         self.assertEqual(res["indexed_columns"], 40)

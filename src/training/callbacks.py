@@ -205,33 +205,8 @@ class DriveCheckpointCallback(TrainerCallback):
             return False
 
     def _prune_old_drive_checkpoints(self):
-        """Removes older checkpoints if count exceeds max_drive_checkpoints."""
-        if not self.max_drive_checkpoints or self.max_drive_checkpoints <= 0:
-            return
-
-        pattern = re.compile(r"^checkpoint[-_](\d+)$")
-        checkpoints = []
-
-        if not os.path.exists(self.drive_dir):
-            return
-
-        for entry in os.listdir(self.drive_dir):
-            full_path = os.path.join(self.drive_dir, entry)
-            if os.path.isdir(full_path):
-                match = pattern.match(entry)
-                if match:
-                    step = int(match.group(1))
-                    checkpoints.append((step, full_path))
-
-        if len(checkpoints) > self.max_drive_checkpoints:
-            checkpoints.sort(key=lambda x: x[0])  # Oldest first
-            to_remove = checkpoints[:len(checkpoints) - self.max_drive_checkpoints]
-            for step, path in to_remove:
-                try:
-                    shutil.rmtree(path)
-                    logger.info(f"[DriveSync] Pruned old Drive checkpoint step {step}: {path}")
-                except Exception as e:
-                    logger.warning(f"[DriveSync] Could not prune old checkpoint {path}: {e}")
+        """Retain research checkpoints; archival is an explicit user operation."""
+        logger.info("Checkpoint retention is non-destructive; no files pruned.")
 
     def on_save(self, args, state, control, **kwargs):
         """Called by HuggingFace Trainer whenever a checkpoint is saved."""

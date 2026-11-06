@@ -1,7 +1,7 @@
 """
 Laya-421M (ModernBERT) System-1 0-Token Decision Scorer & Adaptive Early-Exit Gate.
-Implements calibrated confidence scoring (~1.2 ms latency, ECE <= 0.081)
-and Adaptive Early-Exit Gate at >= 0.85 confidence.
+Loads trained sequence-classification weights and held-out temperature scaling.
+Latency and ECE must be measured on the target hardware and held-out data.
 """
 
 import math
@@ -39,8 +39,8 @@ class AdaptiveEarlyExitGate:
 class LayaScorer:
     """
     Laya-421M System-1 0-Token Decision Scorer.
-    Calculates calibrated candidate confidence in parallel using [MASK] token representation
-    and calibrated temperature scaling.
+    Calculates candidate confidence with the trained ModernBERT classification
+    head and exported temperature. Heuristics are reserved for smoke mode.
     """
 
     def __init__(
@@ -48,8 +48,15 @@ class LayaScorer:
         model_path: Optional[str] = None,
         threshold: float = 0.75,
         temperature: float = 0.20,
-        early_exit_threshold: float = 0.85
+        early_exit_threshold: float = 0.85,
+        device: str = "cpu",
+        dry_run: bool = True
     ):
+        self.device = device
+        self.dry_run = dry_run
+        self.max_length = 512
+        if not dry_run and not model_path:
+            raise ValueError("Real System-1 scoring requires a trained model_path")
         self.model_path = model_path
         self.threshold = threshold
         self.temperature = max(1e-4, temperature)
@@ -61,16 +68,27 @@ class LayaScorer:
 
     def _init_model(self) -> None:
         """Loads ModernBERT model if model_path is provided and environment supports torch."""
-        if self.model_path:
-            try:
-                import torch
-                from transformers import AutoModelForSequenceClassification, AutoTokenizer
-                self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
-                self.model = AutoModelForSequenceClassification.from_pretrained(self.model_path)
-                self.model.eval()
-            except Exception:
-                self.model = None
-                self.tokenizer = None
+        if not self.model_path:
+            return
+        import json
+        from pathlib import Path
+        import torch
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        meta_path = Path(self.model_path) / 'calibration_meta.json'
+        if not meta_path.exists():
+            raise FileNotFoundError(f'Trained System-1 calibration metadata missing: {meta_path}')
+        meta = json.loads(meta_path.read_text())
+        if not meta.get('trained') or meta.get('mode') != 'train':
+            raise ValueError('System-1 artifact is a smoke artifact, not a trained model')
+        self.temperature = float(meta['temperature'])
+        self.max_length = int(meta.get('max_length', 512))
+        if not math.isfinite(self.temperature) or self.temperature <= 0:
+            raise ValueError('Invalid trained temperature')
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            self.model_path, attn_implementation='eager').to(self.device)
+        self.model.eval()
+
 
     def _extract_schema_tables(self, schema_ddl: str) -> List[str]:
         """Extracts table names from schema DDL."""
@@ -130,6 +148,10 @@ class LayaScorer:
         """
         Calculates calibrated confidence probability P in [0.0, 1.0] for a candidate SQL.
         """
+        if self.model is not None:
+            return self.score_candidates_parallel(question, schema_ddl, [sql])[0]
+        if not self.dry_run:
+            raise RuntimeError("Real scoring cannot use heuristic fallback")
         logit = self._compute_calibrated_logit(question, schema_ddl, sql)
         # Calibrated temperature scaling
         scaled = logit / self.temperature
@@ -148,12 +170,33 @@ class LayaScorer:
     ) -> List[float]:
         """
         Computes calibrated scores in parallel for multiple candidate trajectories.
-        Target latency: ~1.2 ms.
+        Peak inference batch size is bounded; latency is hardware dependent.
         """
-        start = time.perf_counter()
-        scores = [self.score_candidate(question, schema_ddl, cand) for cand in candidates]
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        if self.model is None:
+            return [self.score_candidate(question, schema_ddl, cand) for cand in candidates]
+        import torch
+        from src.training.train_decision_model import decision_text, validate_decision_budget
+        scores = []
+        # Bound peak memory; classifier never autoregressively generates tokens.
+        with torch.inference_mode():
+            for offset in range(0, len(candidates), 4):
+                batch=candidates[offset:offset+4]
+                for sql in batch:
+                    validate_decision_budget(self.tokenizer,question,sql,self.max_length)
+                texts = [decision_text(question, schema_ddl, sql) for sql in batch]
+                inputs = self.tokenizer(texts, padding=True, truncation=True,
+                                        max_length=self.max_length, return_tensors='pt')
+                inputs = {k:v.to(self.device) for k,v in inputs.items()}
+                logits = self.model(**inputs).logits.float()
+                if logits.shape[-1] == 1:
+                    margins = logits[:,0]
+                elif logits.shape[-1] == 2:
+                    margins = logits[:,1] - logits[:,0]
+                else:
+                    raise ValueError('System-1 classifier must have one or two logits')
+                scores.extend((margins / self.temperature).sigmoid().cpu().tolist())
         return scores
+
 
     def evaluate(self, question: str, schema_ddl: str, sql: str) -> Tuple[float, str]:
         """

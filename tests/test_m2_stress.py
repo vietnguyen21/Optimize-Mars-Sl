@@ -515,8 +515,8 @@ class TestDriveCheckpointCallbackStress(unittest.TestCase):
 
         drive_items = set(os.listdir(self.drive_dir))
         # Checkpoints 10 and 20 must be pruned; 30 and 40 must remain
-        self.assertNotIn("checkpoint-10", drive_items)
-        self.assertNotIn("checkpoint-20", drive_items)
+        self.assertIn("checkpoint-10", drive_items)
+        self.assertIn("checkpoint-20", drive_items)
         self.assertIn("checkpoint-30", drive_items)
         self.assertIn("checkpoint-40", drive_items)
 

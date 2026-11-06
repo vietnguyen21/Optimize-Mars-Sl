@@ -1,3 +1,5 @@
+> **Kaggle pipeline correction:** Historical completion and benchmark claims below describe the earlier scaffold and are not evidence of trained-model performance. See [KAGGLE.md](KAGGLE.md) for the current real/smoke distinction, artifact contracts, reproducibility and validation limits. Full Kaggle GPU training has not been validated.
+
 # TÀI LIỆU BÀN GIAO KỸ THUẬT TOÀN DIỆN (TECHNICAL HANDOVER DOCUMENT)
 ## Hệ Thống Đa Tác Tử Text-to-SQL SLM Siêu Nhẹ (2.5B–4.0B) Theo Mô Hình Director-Led SSoT
 

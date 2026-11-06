@@ -257,3 +257,51 @@ class XGrammarPDAEngine(BaseGrammarEngine):
         is_valid, err = self.validate_prefix(prefix_sql)
         bitmask = self.generate_bitmask(prefix_sql)
         return is_valid, bitmask
+
+
+# Native vocabulary masks above are diagnostic helpers only. This is the actual
+# tokenizer-aware HF integration. See https://xgrammar.mlc.ai/docs/latest/start/quick_start.html
+_HF_COMPILED_CACHE = {}
+
+
+def make_hf_sql_processor(tokenizer, vocab_size, schema_ddl=''):
+    """Enforce a documented SQLite SELECT subset during sampling.
+
+    This grammar is intentionally conservative (SELECTs, joins, aggregates,
+    subqueries, set operators). It is not the complete SQLite language. Table
+    names are schema constrained; column existence is verified by DB probing.
+    No Python pseudo-bitmask is substituted if xgrammar cannot load or compile.
+    """
+    import json
+    import xgrammar as xgr
+    from xgrammar.contrib.hf import LogitsProcessor
+    key = (id(tokenizer), vocab_size, hashlib.sha256(schema_ddl.encode()).hexdigest())
+    if key not in _HF_COMPILED_CACHE:
+        tables = re.findall(r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|(\w+))',
+                            schema_ddl, re.I)
+        names = sorted({next(value for value in groups if value) for groups in tables})
+        table_rule = ' | '.join(json.dumps(value) for name in names
+            for value in (name, '"' + name.replace('"', '""') + '"', '`' + name + '`')) or 'identifier'
+        grammar = r'''
+root ::= ws "<think>" [^<]* "</think>" ws "<answer>" ws query ws ";"? ws "</answer>" ws
+ws ::= [ \t\r\n]*
+sp ::= [ \t\r\n]+
+query ::= select-stmt (sp ("UNION" (sp "ALL")? | "INTERSECT" | "EXCEPT") sp select-stmt)*
+select-stmt ::= "SELECT" sp ("DISTINCT" sp)? expr (ws "," ws expr)* (sp "FROM" sp table-ref (ws "," ws table-ref | sp join-clause)*)? (sp "WHERE" sp expr)? (sp "GROUP" sp "BY" sp expr (ws "," ws expr)* (sp "HAVING" sp expr)?)? (sp "ORDER" sp "BY" sp ordering (ws "," ws ordering)*)? (sp "LIMIT" sp [0-9]+ (sp "OFFSET" sp [0-9]+)?)?
+ordering ::= expr (sp ("ASC" | "DESC"))?
+table-ref ::= (table-name | "(" ws query ws ")") (sp ("AS" sp)? identifier)?
+join-clause ::= (("INNER" | "LEFT" (sp "OUTER")? | "CROSS") sp)? "JOIN" sp table-ref (sp "ON" sp expr | sp "USING" ws "(" ws identifier (ws "," ws identifier)* ws ")")?
+expr ::= atom (ws binary-op ws atom)* (sp "AS" sp identifier)?
+binary-op ::= "=" | "!=" | "<>" | "<=" | ">=" | "<" | ">" | "+" | "-" | "*" | "/" | "%" | "||" | "AND" | "OR" | "LIKE" | "NOT LIKE" | "IN" | "NOT IN" | "IS" | "IS NOT" | "BETWEEN"
+atom ::= ("NOT" sp | "-" | "+")? (function | column | literal | "(" ws query ws ")" | "(" ws expr (ws "," ws expr)* ws ")" | case-expr)
+case-expr ::= "CASE" (sp expr)? (sp "WHEN" sp expr sp "THEN" sp expr)+ (sp "ELSE" sp expr)? sp "END"
+function ::= identifier ws "(" ws ("DISTINCT" sp)? (expr (ws "," ws expr)*)? ws ")"
+column ::= "*" | identifier (ws "." ws (identifier | "*"))?
+identifier ::= [a-zA-Z_] [a-zA-Z0-9_]* | "\"" ([^\"] | "\"\"")+ "\"" | "`" [^`]+ "`" | "[" [^\]]+ "]"
+literal ::= [0-9]+ ("." [0-9]+)? | "'" ([^'] | "''")* "'" | "NULL" | "TRUE" | "FALSE"
+'''
+        grammar += '\ntable-name ::= ' + table_rule + '\n'
+        tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer, vocab_size=vocab_size)
+        _HF_COMPILED_CACHE[key] = xgr.GrammarCompiler(tokenizer_info).compile_grammar(grammar)
+    # A fresh stateful matcher is required for each independent sampled response.
+    return LogitsProcessor(_HF_COMPILED_CACHE[key])

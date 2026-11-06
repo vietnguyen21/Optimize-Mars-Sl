@@ -14,10 +14,12 @@ import os
 import resource
 import sqlite3
 import statistics
+import re
+import time
 from typing import List, Tuple, Dict, Any, Optional, Set, Union
 
 
-def normalize_query_result(rows: Any) -> Any:
+def normalize_query_result(rows: Any, preserve_order: bool = False) -> Any:
     """
     Normalizes SQL query output rows for robust multiset comparison:
     - Rounds floating-point numbers to 4 decimal places.
@@ -49,6 +51,8 @@ def normalize_query_result(rows: Any) -> Any:
             else:
                 normalized.append((str(row).strip(),))
 
+    if preserve_order:
+        return normalized
     # Sort normalized rows so set ordering differences do not penalize valid SQL
     try:
         return sorted(normalized, key=lambda r: tuple(str(x) for x in r))
@@ -56,13 +60,13 @@ def normalize_query_result(rows: Any) -> Any:
         return normalized
 
 
-def compare_sql_results(res1: Any, res2: Any) -> bool:
+def compare_sql_results(res1: Any, res2: Any, preserve_order: bool = False) -> bool:
     """
     Compares two query result sets for equivalence.
     Returns True if sets match after normalization.
     """
-    norm1 = normalize_query_result(res1)
-    norm2 = normalize_query_result(res2)
+    norm1 = normalize_query_result(res1, preserve_order)
+    norm2 = normalize_query_result(res2, preserve_order)
     return norm1 == norm2
 
 
@@ -72,15 +76,24 @@ def execute_query_safely(sql: str, db_path: str, timeout: float = 3.0) -> Tuple[
     """
     if not os.path.exists(db_path):
         return False, f"Database not found: {db_path}"
+    if not isinstance(sql, str) or not sql.strip():
+        return False, "No SQL prediction (abstention)"
+    conn = None
     try:
-        conn = sqlite3.connect(db_path, timeout=timeout)
-        cursor = conn.cursor()
-        cursor.execute(sql.strip())
+        conn = sqlite3.connect(f"file:{os.path.abspath(db_path)}?mode=ro", uri=True, timeout=timeout)
+        conn.execute("PRAGMA query_only = ON")
+        deadline = time.monotonic() + timeout
+        conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+        cursor = conn.execute(sql.strip())
+        if cursor.description is None:
+            return False, "Statement did not return a result set"
         rows = cursor.fetchall()
-        conn.close()
         return True, rows
     except Exception as err:
         return False, str(err)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def compute_execution_accuracy(
@@ -95,6 +108,8 @@ def compute_execution_accuracy(
     Returns:
         Tuple of (ex_percentage: float, list_of_matches: List[bool]).
     """
+    if len(predictions) != len(gold_queries) or len(predictions) != len(db_paths):
+        raise ValueError("Prediction, label, and database counts must match")
     if not predictions or not gold_queries:
         return 0.0, []
 
@@ -105,7 +120,7 @@ def compute_execution_accuracy(
         p_ok, p_res = execute_query_safely(pred_sql, db_path)
         g_ok, g_res = execute_query_safely(gold_sql, db_path)
 
-        if p_ok and g_ok and compare_sql_results(p_res, g_res):
+        if p_ok and g_ok and compare_sql_results(p_res, g_res, preserve_order=bool(re.search(r"\bORDER\s+BY\b", gold_sql, re.I))):
             matches.append(True)
         else:
             matches.append(False)
@@ -122,6 +137,8 @@ def compute_vsr(predictions: List[str], db_paths: List[str]) -> Tuple[float, Lis
     Returns:
         Tuple of (vsr_percentage: float, list_of_valid: List[bool]).
     """
+    if len(predictions) != len(db_paths):
+        raise ValueError("Prediction and database counts must match")
     if not predictions:
         return 0.0, []
 
@@ -186,7 +203,7 @@ def compute_latency_stats(latencies_ms: List[float]) -> Dict[str, float]:
     Computes mean, median, P95, and P99 latency statistics in milliseconds.
     """
     if not latencies_ms:
-        return {"mean": 0.0, "median": 0.0, "p95": 0.0, "p99": 0.0, "total_s": 0.0}
+        return {"mean_ms": 0.0, "median_ms": 0.0, "p95_ms": 0.0, "p99_ms": 0.0, "total_s": 0.0}
 
     sorted_lat = sorted(latencies_ms)
     n = len(sorted_lat)
@@ -215,16 +232,20 @@ def measure_memory_footprint() -> Dict[str, Any]:
     ram_mb = usage.ru_maxrss / 1024.0
 
     gpu_vram_mb = 0.0
+    per_device = {}
     try:
         import torch
         if torch.cuda.is_available():
-            gpu_vram_mb = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
+            per_device = {f"cuda:{index}": round(torch.cuda.max_memory_allocated(index) / (1024.0 * 1024.0), 2)
+                          for index in range(torch.cuda.device_count())}
+            gpu_vram_mb = sum(per_device.values())
     except Exception:
         pass
 
     return {
         "ram_mb": round(ram_mb, 2),
         "gpu_vram_mb": round(gpu_vram_mb, 2),
+        "gpu_peak_allocated_mb_by_device": per_device,
         "vram_gb": round(gpu_vram_mb / 1024.0, 3)
     }
 
@@ -245,25 +266,24 @@ def format_benchmark_summary(
     vram = metrics.get("memory", {}).get("vram_gb", 0.0)
     total_q = metrics.get("total_queries", 0)
 
-    table = f"""# {title}
+    mode = metrics.get("mode", "evaluation")
+    warning = "Smoke fixtures only: these measurements are not model benchmark results." if mode == "smoke" else "Held-out predictions; no target SQL is supplied to generation or candidate selection."
+    return f"""# {title}
 
-### Core Evaluation Metrics (Total Queries Evaluated: {total_q})
-| Metric | Measurement | Target Standard | Status |
-|:-------|:------------|:----------------|:-------|
-| **Execution Accuracy (EX)** | **{ex:.2f}%** | $\\ge 75.0\\%$ | {'✅ PASSED' if ex >= 75.0 else '🔍 EVALUATED'} |
-| **Valid SQL Rate (VSR)** | **{vsr:.2f}%** | $100.0\\%$ (XGrammar) | {'✅ 100%' if vsr >= 99.9 else f'{vsr:.1f}%'} |
-| **Expected Calibration Error (ECE)** | **{ece:.4f}** | $\\le 0.081$ | {'✅ CALIBRATED' if ece <= 0.081 else '⚠️ TUNING'} |
-| **Average End-to-End Latency** | **{latency_ms:.2f} ms** ({latency_s:.2f}s) | $\\le 5.8$ seconds | {'✅ FAST' if latency_s <= 5.8 else '⚠️ SLOW'} |
-| **GPU VRAM Footprint** | **{vram:.2f} GB** | $\\le 8.5$ GB | {'✅ LOW VRAM' if vram <= 8.5 else '⚠️ HIGH'} |
+{warning}
 
-### Scientific Comparison vs. Baselines
-| System / Architecture | Model Size | EX (BIRD-dev) | VSR | Avg Latency | Peak VRAM |
-|:----------------------|:----------:|:-------------:|:---:|:-----------:|:---------:|
-| **MARS-SQL 21B (Baseline)** | 21.0B | 74.8% | 78.6% – 92.9% | ~22.0 s | 41.0 – 47.0 GB |
-| **Combo A (Ultra-Light)** | 1.5B | 69.5% – 72.0% | 100.0% | ~3.8 s | < 8.0 GB RAM |
-| **Combo C (Pareto SOTA)** | 3.0B | 75.0% – 76.8% | 100.0% | ~5.2 s | 8.0 – 16.0 GB |
-| **Our Evaluated Pipeline** | **SLM (3B/7B)** | **{ex:.2f}%** | **{vsr:.2f}%** | **{latency_s:.2f} s** | **{vram:.2f} GB** |
+| Metric | Measured value |
+|:--|--:|
+| Queries | {total_q} |
+| Execution Accuracy (EX) | {ex:.2f}% |
+| Valid SQL Rate (VSR) | {vsr:.2f}% |
+| Expected Calibration Error | {ece:.4f} |
+| Mean latency | {latency_ms:.2f} ms |
+| Peak allocated VRAM | {vram:.2f} GB |
+| Coverage | {metrics.get('coverage_pct', 100):.2f}% |
 
-*Generated by Text-to-SQL SLM Evaluation Suite (Milestone M4).*
-"""
-    return table.strip()
+Grammar mode: {metrics.get('constraint_mode', 'unspecified')}.
+Grounding mode: {metrics.get('grounding_mode', 'unspecified')}.
+Abstentions count as incorrect and invalid predictions. No external baseline
+numbers are asserted by this report.
+""".strip()

@@ -1,0 +1,59 @@
+
+[1m[96m====================================================================================================[0m
+[1m[95m    TEXT-TO-SQL SLM ARCHITECTURE — COMPREHENSIVE SMOKE TEST & VERIFICATION SUITE[0m
+[1m[96m====================================================================================================[0m
+[2mTarget Environment: CPU / Local Offline Smoke-Test (Zero GPU/Heavy Model Download Dependency)[0m
+[2mPlumbing checks only; smoke fixture scores are not research benchmark results[0m
+[1m[96m----------------------------------------------------------------------------------------------------[0m
+
+[1m[RUNNING][0m Suite 1: Data Pipeline & Schema Grounding (PK-FK Graph, Steiner Tree NWST, Column Cards, Embedding Retriever)...
+  [92m✔ PASSED[0m in 0.024s (25 test cases)
+
+[1m[RUNNING][0m Suite 2: SLM Training Scripts (Completion-Only Loss (-100), LLM-JEPA 2-Block Mask, Dense GRPO, DriveSync)...
+  [92m✔ PASSED[0m in 0.178s (24 test cases)
+
+[1m[RUNNING][0m Suite 3: Colab Training Notebooks (49 Code Cells dynamic execution across Notebooks 01 to 05)...
+  [92m✔ PASSED[0m in 0.592s (4 test cases)
+
+[1m[RUNNING][0m Suite 4: Grammar PDA & Validation Rules (XGrammar PDA, Fallback Engine, 10 PV-SQL AST Rules, DB Probe, Laya-421M)...
+  [92m✔ PASSED[0m in 0.006s (30 test cases)
+
+[1m[RUNNING][0m Suite 5: Evaluation & Benchmark Suite (Candidate Generator (8-16 rollouts), Multiset EX, VSR, ECE, Memory Stats)...
+  [92m✔ PASSED[0m in 0.112s (26 test cases)
+
+[1m[RUNNING][0m Suite 6: End-to-End Fixture Plumbing (24 Queries) on data/mini/mini_bird.jsonl...
+  [92m✔ PASSED[0m in 0.068s (24 evaluation queries)
+
++--------------------------------------------------------+--------------+--------------+--------------+
+| Test Suite / Verification Block                        |  Test Cases  |   Time (s)   |    Status    |
++--------------------------------------------------------+--------------+--------------+--------------+
+| Suite 1: Data Pipeline & Schema Grounding              |      25      |    0.024s    |    [92mPASSED[0m    |
+| Suite 2: SLM Training Scripts                          |      24      |    0.178s    |    [92mPASSED[0m    |
+| Suite 3: Colab Training Notebooks                      |      4       |    0.592s    |    [92mPASSED[0m    |
+| Suite 4: Grammar PDA & Validation Rules                |      30      |    0.006s    |    [92mPASSED[0m    |
+| Suite 5: Evaluation & Benchmark Suite                  |      26      |    0.112s    |    [92mPASSED[0m    |
+| Suite 6: End-to-End Fixture Plumbing (24 Queries)      |      24      |    0.068s    |    [92mPASSED[0m    |
++--------------------------------------------------------+--------------+--------------+--------------+
+| [1mTOTAL / OVERALL SYSTEM-LEVEL SUMMARY                  [0m | [1m    133     [0m | [1m   1.023s   [0m | [1m [92mALL PASSED[0m [0m |
++--------------------------------------------------------+--------------+--------------+--------------+
+
+# Suite 6: End-to-End Mini-BIRD Evaluation Report
+
+Smoke fixtures only: these measurements are not model benchmark results.
+
+| Metric | Measured value |
+|:--|--:|
+| Queries | 24 |
+| Execution Accuracy (EX) | 0.00% |
+| Valid SQL Rate (VSR) | 0.00% |
+| Expected Calibration Error | 0.0000 |
+| Mean latency | 2.54 ms |
+| Peak allocated VRAM | 0.00 GB |
+| Coverage | 0.00% |
+
+Grammar mode: posthoc.
+Grounding mode: lexical_ablation.
+Abstentions count as incorrect and invalid predictions. No external baseline
+numbers are asserted by this report.
+
+[1m[92m[VERIFICATION SUCCESSFUL][0m All 6 suites passed in 1.023s (< 60.0s threshold). CPU plumbing checks passed; GPU training and model quality remain unverified.

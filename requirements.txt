@@ -1,9 +1,9 @@
 # Deep Learning & Core LLM
-torch>=2.2.0
-transformers>=4.44.0
+torch>=2.5.0
+transformers>=4.51.3,<5
 datasets>=2.20.0
 accelerate>=0.33.0
-peft>=0.12.0
+peft>=0.15.2
 trl>=0.9.6
 bitsandbytes>=0.43.0
 
@@ -19,7 +19,7 @@ numpy>=1.26.0
 sqlglot>=25.0.0
 
 # Embeddings & Retrieval
-sentence-transformers>=3.0.0
+sentence-transformers>=4.1.0
 
 # Utilities & Data
 pydantic>=2.7.0
