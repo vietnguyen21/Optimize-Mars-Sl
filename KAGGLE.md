@@ -1,4 +1,4 @@
-# Kaggle training and evaluation
+# Official Kaggle training guide — three-person research team
 
 ## Status and evidence
 
@@ -32,6 +32,252 @@ Use Internet-enabled Kaggle for first-time package/model downloads, or attach ap
 `meta-llama/Llama-3.2-3B-Instruct` requires accepted model access terms and authenticated HF access. Obtain a token through Kaggle Secrets and authenticate using `huggingface_hub.login(token=...)` without printing it, or set `GENERATOR_MODEL` to an attached authorized local base model. Base weights remain required to load a PEFT adapter. Set `BASE_MODEL_PATH` to the corresponding attached base-model directory if the path stored in a shared adapter is unavailable in the receiving account/session. The override must refer to the same model and vocabulary used in SFT. The project does not export gated base weights.
 
 One 16 GB T4 is the initial target: FP16 compute, NF4 double quantization for Generation, rank-16 LoRA, gradient checkpointing, one microbatch, sequential sampling. Two T4s have separate memory; the implementation does not pretend they provide pooled 32 GB VRAM. Use separate `TRAIN_DEVICE` values/processes for independent experiments if desired. No DDP is required. Start with 3B. A 7B configuration is optional and requires measured memory validation. Reduce sequence and rollout lengths on OOM. Some short-sequence datasets require a larger `MAX_LENGTH` for complete reasoning+SQL examples; SFT logs any excluded overlength examples. Inspect this count rather than assuming the full dataset was used.
+
+## Team workflow and dependencies
+
+Follow the setup, member instructions, handoff and acceptance steps below in order. The later data/objective/checkpoint sections remain the technical reference. All paths in executable cells are examples of attached Dataset layouts: replace them with the paths shown in your own Kaggle input panel. Run the common configuration cell above, then the relevant member cell **before any notebook setup cell**. Use a fresh kernel for each experiment; setup captures environment values once.
+
+| Owner | Work and deliverables | Dependencies |
+|---|---|---|
+| Member 1 — Grounding Agent | Notebook 01, Qwen3-Embedding-0.6B; database column cards, PK–FK schema graphs, Node-Weighted Steiner Tree integration, embedding/index export and retrieval validation; support final integration | Repository, training/retrieval splits, SQLite schemas, model weights |
+| Member 2 — Generation Agent | Notebook 02 SFT-only and SFT+JEPA in separate runs; Notebook 03 Dense GRPO initialized from selected SFT checkpoints; adapter and reward diagnostics | SFT data/base weights first; GRPO additionally needs SFT artifact, reward data and SQLite databases |
+| Member 3 — Validation Agent | Notebook 04 ModernBERT System-1 training and calibration; own evaluation harness configuration, split audit and benchmark records | Prebuilt execution-labeled candidates allow independent start; new candidate sampling depends on Member 2's trained generator |
+| All three | Notebook 05 final evaluation: Member 1 verifies retrieval/schema integration, Member 2 verifies generator/base identity, Member 3 runs and audits evaluation; all review results | Accepted Grounding + Generation + calibrated System-1 artifacts and frozen held-out data |
+
+01 and 02 can run concurrently; 04 can also run concurrently when independently sampled candidate artifacts already exist. 03 follows 02. Notebook 04's `CANDIDATE_SOURCE` branch labels supplied candidates; it does **not** automatically sample a generator. No training stage requires another notebook's live Python state.
+
+### Common preparation for each account
+
+1. Upload/open the assigned existing `.ipynb` in Kaggle. Attach the same versioned repository snapshot and licensed research data. Select a GPU runtime for real training; start on `cuda:0` of one T4. Set the common cell above and your member cell below. Use a unique output root for every run.
+2. Enable Internet for initial package/model downloads, or attach compatible wheels and authorized complete local model/tokenizer directories. The notebook's automatic installer uses pip and does not configure an offline wheel directory for you. Install offline wheels explicitly before setup if needed, then use `INSTALL_DEPS=0`. Keep CUDA torch >=2.5. The pinned direct dependencies in [requirements-kaggle.txt](requirements-kaggle.txt) are a candidate Python 3.10/3.11 lock, not a certified Kaggle environment. Restart the kernel after changing imported packages and rerun configuration.
+3. For Member 2 and the evaluation operator, authorize the gated Llama base first. With a Kaggle Secret named `HF_TOKEN`, run the following before model loading when downloading from HF:
+
+```python
+from kaggle_secrets import UserSecretsClient
+from huggingface_hub import login
+login(token=UserSecretsClient().get_secret("HF_TOKEN"), add_to_git_credential=False)
+```
+
+4. Execute the notebook in order. Confirm printed mode, data, output, GPU and resume path before the training cell. Retain `environment.json`, configuration cells, data versions and actual model identity with the artifact.
+
+### Member 1 setup — Notebook 01
+
+Attach repository + `text2sql-data` with training/retrieval files and SQLite databases. Download Qwen weights with Internet or attach a local SentenceTransformer-compatible model and set `EMBEDDING_MODEL` to its directory. No Generation or System-1 checkpoint is needed.
+
+```python
+import os
+os.environ.update({
+    'KAGGLE_OUTPUT_DIR': '/kaggle/working/m1-grounding-seed42',
+    'TRAIN_DATA': '/kaggle/input/text2sql-data/train.jsonl',
+    'RETRIEVAL_EVAL_DATA': '/kaggle/input/text2sql-data/retrieval_dev.jsonl',
+    'DB_DIR': '/kaggle/input/text2sql-data/databases',
+    'EMBEDDING_MODEL': 'Qwen/Qwen3-Embedding-0.6B',
+})
+os.environ.pop('CARDS_PATH', None)  # Let 01 extract database-scoped cards/graphs.
+os.environ.pop('RESUME_FROM_CHECKPOINT', None)  # Fresh training.
+```
+
+Run 01; inspect held-out retrieval and index metadata. Save the entire Grounding stage, including cards, `schema_graphs.json`, column index and `final/`. If supplying `CARDS_PATH`, attach it explicitly; the automatic card/graph extraction branch is then bypassed, so preserve schema-graph provenance separately. Support Member 3 in verifying schema coverage at integration.
+
+### Member 2 setup — Notebook 02, then 03
+
+For 02 attach repository + SFT data; download or attach the authorized Llama-3.2-3B-Instruct base including tokenizer. SFT does not require SQLite or another trained agent.
+
+```python
+import os
+os.environ.update({
+    'KAGGLE_OUTPUT_DIR': '/kaggle/working/m2-sft-only-seed42',
+    'SFT_DATA': '/kaggle/input/text2sql-data/sft_train.jsonl',
+    'GENERATOR_MODEL': 'meta-llama/Llama-3.2-3B-Instruct',
+    'LAMBDA_JEPA': '0',
+})
+os.environ.pop('RESUME_FROM_CHECKPOINT', None)
+```
+
+Run 02 and retain its returned `summary['checkpoint_path']`. For SFT+JEPA, restart the kernel, rerun common setup and the same member cell, then apply this cell before notebook setup:
+
+```python
+os.environ.update({
+    'KAGGLE_OUTPUT_DIR': '/kaggle/working/m2-sft-jepa-seed42',
+    'LAMBDA_JEPA': '0.1',
+})
+```
+
+Keep data, seed, base model and budgets matched. This is fresh training, not continuation from the baseline: the JEPA objective differs. Inspect `dropped_overlength` and actual optimizer updates; short lengths can exclude complete reasoning+SQL examples.
+
+For 03 attach repository + GRPO data/SQLite databases + one chosen complete SFT adapter artifact + access to the same base weights. Start a fresh kernel and common setup, then:
+
+```python
+import os
+os.environ.update({
+    'KAGGLE_OUTPUT_DIR': '/kaggle/working/m2-grpo-from-jepa-seed42',
+    'SFT_CHECKPOINT': '/kaggle/input/sft-jepa-artifacts/train/sft_jepa_3b/checkpoint-100',
+    'GRPO_DATA': '/kaggle/input/text2sql-data/grpo_train.jsonl',
+    'DB_DIR': '/kaggle/input/text2sql-data/databases',
+    'GROUP_SIZE': '2',
+    'MAX_NEW_TOKENS': '128',
+})
+os.environ.pop('RESUME_FROM_CHECKPOINT', None)
+```
+
+Replace `checkpoint-100` with the actual complete SFT checkpoint. `SFT_CHECKPOINT` initializes a **new GRPO objective**; it is not GRPO resume. Use `BASE_MODEL_PATH` for a relocated identical local base. Retain the returned GRPO checkpoint and its frozen `reference/` adapter. Inspect four reward components, zero-variance groups, skipped examples and actual policy updates. Repeat from the SFT-only artifact in a separate root if comparing both initialization paths.
+
+Notebook 03 does not switch to 7B automatically. An optional 7B experiment requires its own Notebook 02 SFT adapter with the corresponding base (for example Qwen2.5-Coder-7B), then 03 with that adapter. Never mix Llama 3B adapters with a 7B base. Phase names still contain `3b`; record actual model identity. 7B T4 fit remains unverified.
+
+### Member 3 setup — Notebook 04 and evaluation ownership
+
+Attach repository + three question-disjoint labeled candidate files; download ModernBERT-large or attach its full model/tokenizer directory and use that path in `DECISION_MODEL`. No Generation checkpoint is required for prebuilt labels. SQLite databases are additionally required if constructing labels from supplied candidate SQL.
+
+```python
+import os
+os.environ.update({
+    'KAGGLE_OUTPUT_DIR': '/kaggle/working/m3-system1-seed42',
+    'DECISION_DATA': '/kaggle/input/decision-data/decision_train.jsonl',
+    'CALIBRATION_DATA': '/kaggle/input/decision-data/decision_calibration.jsonl',
+    'DECISION_TEST_DATA': '/kaggle/input/decision-data/decision_test.jsonl',
+    'DECISION_MODEL': 'answerdotai/ModernBERT-large',
+})
+os.environ.pop('CANDIDATE_SOURCE', None)
+os.environ.pop('RESUME_FROM_CHECKPOINT', None)
+```
+
+For automatic execution labeling/grouped splits, instead set:
+
+```python
+os.environ.update({
+    'CANDIDATE_SOURCE': '/kaggle/input/candidates/sampled_candidates.jsonl',
+    'DB_DIR': '/kaggle/input/text2sql-data/databases',
+})
+```
+
+This branch overrides the three labeled paths with files it writes inside the stage output; use a new root to avoid exclusive-write collisions. Preserve these generated splits for resume and the final overlap audit. On resume, attach those exact split files using the first configuration and unset `CANDIDATE_SOURCE`. Both correct and incorrect training candidates are required. Keep every candidate for one question in one split. Save `final/` with `calibration_meta.json`; inspect temperature, held-out NLL calibration procedure and scaled/unscaled test ECE. Member 3 owns leakage auditing and the evaluation checklists below.
+
+### Actual notebook controls and conservative T4 starting settings
+
+| Interface | Used by |
+|---|---|
+| `KAGGLE_REPO_DIR`, `KAGGLE_DATA_DIR`, `KAGGLE_OUTPUT_DIR`, `PIPELINE_MODE`, `INSTALL_DEPS`, `TRAIN_DEVICE`, `SEED` | All five setup paths; output is `<root>/<train or smoke>/<phase>/` |
+| `MAX_LENGTH`, `MAX_STEPS`, `SAVE_STEPS`, `RESUME_FROM_CHECKPOINT` | Training calls in 01–04; 05 reads these but does not pass them to evaluation |
+| `GRAD_ACCUM` | 02/03 only; 01/04 use runner default accumulation eight |
+| Stage data/model variables | Exactly those shown in each member configuration and the data-contract table |
+| `BASE_MODEL_PATH` | Shared PEFT loader override for the identical base behind an adapter |
+| Evaluation controls | Exactly those in the integration cell below; use `MAX_PROMPT_LENGTH`, not `MAX_LENGTH` |
+
+Use the common `MAX_LENGTH=512`, `GRAD_ACCUM=8`, `MAX_STEPS=100`, `SAVE_STEPS=25` as an initial short real run; for a first GPU acceptance test lower `MAX_STEPS` to `2` and `SAVE_STEPS` to `1` in a separate root. Generation uses NF4 double quantization/FP16, rank-16 LoRA, checkpointing and a one-example microbatch. GRPO starts with group size two and 128 new tokens. These are conservative **starting points, not measured T4-safe guarantees**. Grounding and ModernBERT use full-model optimization, not Generation's QLoRA. SFT has a default three-epoch ceiling and GRPO two; `MAX_STEPS` is an optimizer-update cap, not a promise that it will be reached. Grounding/System-1 cycle data to their step budget. Epochs, learning rates, LoRA rank, microbatch size and hard-negative counts are not configurable through invented environment variables; changing them requires an explicit runner-call change in a separate experiment.
+
+On OOM, restart the kernel to release stale models, run only one stage/process on the selected GPU, then lower `MAX_LENGTH` (for example 512 → 256) in a fresh run. Check SFT dropped examples and System-1 question/candidate budget errors rather than accepting invalid truncation. For 03 lower `MAX_NEW_TOKENS` (128 → 64); keep `GROUP_SIZE>=2`. For 05 lower `MAX_PROMPT_LENGTH`/`MAX_NEW_TOKENS`, start `NUM_CANDIDATES=1`, and keep Grounding/scoring on CPU. Candidate sampling is sequential; lowering count mainly reduces work. Accumulation is not microbatch size: lowering it generally does not solve activation OOM. Shorter sequences cannot solve model/optimizer residency OOM; if even loading fails, inspect actual CUDA/package compatibility and memory before attempting a larger model. Never replace the base model under an existing adapter. Changed sequence/objective contracts require a fresh run, not forced resume.
+
+### Output paths and cross-account handoff
+
+| Notebook | Directory under `KAGGLE_OUTPUT_DIR` in real mode | Downstream pointer |
+|---|---|---|
+| 01 | `train/grounding/` | `GROUNDING_CHECKPOINT=.../train/grounding/final` |
+| 02 | `train/sft_jepa_3b/` for both ablations | `SFT_CHECKPOINT` or `GENERATOR_CHECKPOINT=.../checkpoint-N` |
+| 03 | `train/grpo_3b/` | `GENERATOR_CHECKPOINT=.../checkpoint-N` |
+| 04 | `train/system1/` | `DECISION_CHECKPOINT=.../train/system1/final` |
+| 05 | `train/evaluation/` | `metrics.json`, `benchmark_summary.md`, `logs/evaluation_results.jsonl` |
+
+1. Before the session ends, save a Kaggle notebook version retaining outputs or download the **entire stage directory**, including logs/environment, complete checkpoints, tokenizers, final exports and GRPO `reference/`. `/kaggle/working` is ephemeral; no automatic cloud transfer exists.
+2. Publish the saved outputs as a private, versioned Kaggle Dataset accessible to the other two team accounts through normal sharing permissions. Record repository/data versions, configuration, source checkpoint identity and checksums. Share authorized adapters, not gated base weights without the required rights.
+3. The recipient attaches that Dataset, inspects its actual directory layout, and updates paths accordingly; upload layouts may add a parent folder. Attach original training inputs and identical base weights separately. Test loading the shared artifact in a fresh session before marking the handoff accepted.
+4. Preserve `COMPLETE` markers and `training_state.pt` for recovery; use only trusted team optimizer-state artifacts. `final/` is an inference export for Grounding/System-1, not their optimizer-resume checkpoint. Never point downstream model loading at a stage root when a final/checkpoint directory is required.
+
+### Fresh training and recovery examples
+
+Fresh training means a new output root with `RESUME_FROM_CHECKPOINT` unset. Downloading pretrained base weights is still fresh task training. Every SFT ablation starts fresh; GRPO initializes from SFT but starts its own optimizer unless resuming GRPO.
+
+```python
+# Fresh experiment (apply before setup in the relevant notebook).
+os.environ['KAGGLE_OUTPUT_DIR'] = '/kaggle/working/new-experiment-seed42'
+os.environ.pop('RESUME_FROM_CHECKPOINT', None)
+```
+
+```python
+# Interrupted run, same session and same stage output root:
+os.environ['RESUME_FROM_CHECKPOINT'] = 'latest'
+# Rerun setup before the training call; latest searches only this stage directory.
+```
+
+```python
+# New session: first rerun the same common/member data and objective configuration.
+os.environ.update({
+    'KAGGLE_OUTPUT_DIR': '/kaggle/working/m2-sft-jepa-recovered',
+    'RESUME_FROM_CHECKPOINT': '/kaggle/input/sft-jepa-artifacts/train/sft_jepa_3b/checkpoint-100',
+    'MAX_STEPS': '200',  # Total desired updates, not 200 additional updates.
+})
+```
+
+Use the actual saved step and keep data bytes, model identity, seed and objective/length contracts unchanged. A new root is necessary when extending completed Grounding/System-1 runs because existing `final/` destinations are protected. SFT/GRPO also respect their epoch ceilings: a checkpoint at the final default epoch will not become a longer run just by raising `MAX_STEPS`. Resume GRPO from a GRPO checkpoint while retaining its original `SFT_CHECKPOINT` and base access; an SFT checkpoint is not a GRPO recovery state. Incomplete hidden staging directories are ignored. `latest` does not search attached datasets. Do not remove completion checks or overwrite immutable checkpoints to bypass a failure.
+
+### Smoke and real-training acceptance checklists
+
+For each member, first restart the kernel and run this configuration **instead of production configuration**, then execute the assigned notebook in order. It removes leftover data/model/checkpoint overrides. All three also run 05 in smoke mode.
+
+```python
+import os
+from pathlib import Path
+for key in (
+    'TRAIN_DATA', 'RETRIEVAL_EVAL_DATA', 'DB_DIR', 'CARDS_PATH', 'SFT_DATA',
+    'GRPO_DATA', 'DECISION_DATA', 'CALIBRATION_DATA', 'DECISION_TEST_DATA',
+    'CANDIDATE_SOURCE', 'EVAL_DATA', 'SFT_CHECKPOINT', 'GENERATOR_CHECKPOINT',
+    'DECISION_CHECKPOINT', 'GROUNDING_CHECKPOINT', 'BASE_MODEL_PATH',
+    'EMBEDDING_MODEL', 'GENERATOR_MODEL', 'DECISION_MODEL',
+    'TRAINING_DATA_PATHS', 'RESUME_FROM_CHECKPOINT',
+):
+    os.environ.pop(key, None)
+os.environ.update({
+    'KAGGLE_REPO_DIR': '/kaggle/input/optimize-mars-repo/Optimize-Mars-Sl',
+    'PIPELINE_MODE': 'smoke', 'INSTALL_DEPS': '0', 'TRAIN_DEVICE': 'cpu',
+    'KAGGLE_OUTPUT_DIR': '/kaggle/working/team-smoke-01',
+})
+os.environ['KAGGLE_DATA_DIR'] = str(Path(os.environ['KAGGLE_REPO_DIR']) / 'data/mini')
+```
+
+- [ ] Every cell completes in order; printed mode is smoke and output is under `smoke/<phase>/`.
+- [ ] Training summaries say `trained: false`; evaluation says `is_benchmark: false`. Retain wiring logs; report no accuracy/convergence claim.
+- [ ] Repeat local test commands below when validating code, and inspect skipped dependencies. Smoke success alone does not validate real model loading.
+
+Then restart and restore real common/member configuration with a new root:
+
+- [ ] Confirm GPU inventory/CUDA torch, authorized model access, package versions, dataset provenance and split disjointness. Record exact configuration and input versions.
+- [ ] Run two optimizer updates with real data/model; verify finite losses, actual updates, complete checkpoints and measured GPU memory. Diagnose failures without switching to smoke.
+- [ ] For 01 check retrieval metrics/index/schema graphs; for 02 check completion masking and overlength counts in logs; for 03 check reward variance and actual policy updates; for 04 check both labels, calibration temperature and test ECE.
+- [ ] Reload the exported inference artifact and test checkpoint resume in a fresh session with unchanged contracts. Retain original artifacts and compare expected step progression.
+- [ ] Only after acceptance, run the predeclared full budget in a distinct root (or valid resume), log actual updates/time/peak VRAM and held-out results, and save/share outputs. A completed run is not proof of convergence or a benchmark target.
+
+### Joint integration and benchmark — Notebook 05
+
+Member 3 operates the harness; Member 1 verifies schema retrieval/Steiner integration and Member 2 verifies the selected adapter and identical base. Attach repository, all three trained artifacts, base weights/access, held-out questions/SQLite databases, and all training manifests. Run common setup in a fresh GPU kernel, then:
+
+```python
+import os
+os.environ.update({
+    'KAGGLE_OUTPUT_DIR': '/kaggle/working/team-eval-grpo-k1-seed42',
+    'GENERATOR_CHECKPOINT': '/kaggle/input/grpo-artifacts/train/grpo_3b/checkpoint-100',
+    'GROUNDING_CHECKPOINT': '/kaggle/input/grounding-artifacts/train/grounding/final',
+    'DECISION_CHECKPOINT': '/kaggle/input/system1-artifacts/train/system1/final',
+    'EVAL_DATA': '/kaggle/input/text2sql-data/test.jsonl',
+    'DB_DIR': '/kaggle/input/text2sql-data/databases',
+    'NUM_CANDIDATES': '1', 'MAX_NEW_TOKENS': '128',
+    'MAX_PROMPT_LENGTH': '512', 'RETRIEVAL_TOP_K': '25',
+    'SCORER_DEVICE': 'cpu', 'GROUNDING_DEVICE': 'cpu',
+    'GRAMMAR_MODE': 'posthoc',
+    'TRAINING_DATA_PATHS': os.pathsep.join([
+        '/kaggle/input/text2sql-data/train.jsonl',
+        '/kaggle/input/text2sql-data/sft_train.jsonl',
+        '/kaggle/input/text2sql-data/grpo_train.jsonl',
+        '/kaggle/input/decision-data/decision_train.jsonl',
+    ]),
+})
+os.environ.pop('RESUME_FROM_CHECKPOINT', None)  # 05 has no training-state resume.
+```
+
+1. Freeze split provenance and configurations before looking at final test results. Keep retrieval development, candidate calibration/test and benchmark test questions disjoint from task training; also keep final benchmark questions out of model selection/calibration. Include every actual training source in `TRAINING_DATA_PATHS`, including both SFT variants and generated candidate-training splits where different. Audit files need `db_id` and `question`; preserve these in SFT records or provide faithful manifests with those keys. The harness checks exact `(db_id, question)` pairs; independently normalize/deduplicate questions and audit database/split provenance. It cannot detect every paraphrase or missing manifest.
+2. Use held-out `SQL` exclusively in scoring after prediction/selection. Do not copy it into schema/evidence, candidate prompts, grounding inputs, model selection or System-1 classifier inputs. Execution-derived candidate labels may use reference SQL only within the designated training/calibration datasets. Never build these datasets from benchmark questions. Gold must not select, repair or rerank a benchmark prediction.
+3. Run a small, predefined held-out integration subset to verify fresh artifact loading and report paths, then a separate frozen benchmark run/root. Confirm `training_overlap_checked=true`, real benchmark status, trained Grounding identity and actual grammar mode. A lexical Grounding ablation must be explicitly labeled. No missing manifest or smoke report qualifies for acceptance.
+4. Evaluate SFT-only, SFT+JEPA and GRPO with identical held-out data, seed, retrieval, generation budgets and validation settings. After measured memory acceptance, sweep `NUM_CANDIDATES` through 1, 4, 8, 16 with separate roots; predeclare any changes to prompt/new-token budgets (for example 2048/256) and apply them consistently. Optional native XGrammar runs form separate matched comparisons.
+5. Save `train/evaluation/metrics.json`, `benchmark_summary.md`, `logs/evaluation_results.jsonl`, environment and configuration with artifact/data versions. Reports are exclusive-write; use a new root on rerun. Review EX, VSR, coverage, overall and accepted-only ECE, latency distributions and measured VRAM together. CPU retrieval/scoring latency counts. Keep abstentions/timeouts explicit and retain failure cases without test-driven retraining.
+6. All three review the saved report and leakage audit. Publish only measured results; no smoke metric, historical scaffold accuracy, target ECE or inferred T4 memory bound is a benchmark result.
 
 ## Data contracts and disjoint splits
 
@@ -105,17 +351,4 @@ Notebook tests execute all cells with `PIPELINE_MODE=smoke` and temporary output
 
 ### Recorded validation for this change
 
-Local CPU validation on Python 3.14 used torch 2.15.0+cpu, transformers 4.51.3, PEFT 0.15.2, sentence-transformers 4.1.0, accelerate 1.6.0, SQLGlot 26.16.4 and nbformat 5.10.4 in an isolated temporary environment. This is not the target Kaggle CUDA image.
-
-| Phase / modified components | Validation and remaining limit |
-|---|---|
-| Shared `runtime.py`, `kaggle.py`, callbacks and notebook setup | Mode/path tests, actual optimizer/RNG checkpoint roundtrip, interrupted-save retry, complete-checkpoint discovery; no automatic deletion. CUDA NF4 loader remains untested. |
-| Grounding / Notebook01 / `train_embedding.py` | Real native tiny SentenceTransformer training, same-database hard negatives, held-out retrieval, native embedding/index export and exact resumed parameters. Full 0.6B GPU run untested. |
-| SFT+JEPA / Notebook02 / Generation modules | Native tiny Llama+PEFT training, completion/EOS/padding masks, SQL-only latent targets, SFT-only ablation and exact epoch-boundary adapter/predictor resume. Gated 3B QLoRA GPU execution untested. |
-| GRPO / Notebook03 / `train_grpo_generator.py` | Native tiny Llama sampled updates, immutable reference adapter export/load, token policy objective, zero-variance handling and exact resumed policy parameters. Optimizer-isolation tests mock rewards; separate tests exercise all four real reward heads. Full-model rollouts/VRAM untested. |
-| System-1 / Notebook04 / `train_decision_model.py`, `laya_scorer.py` | Native tiny ModernBERT training, execution-derived labels (including ordered results), calibration/test splits, temperature, actual exported scorer inference and exact resumed parameters. Full-size classifier GPU run untested. |
-| Evaluation / Notebook05 / evaluation, grammar and DB probe modules | Independent inference boundary, actual tensor generation/parsing/log probabilities, SQLGlot ASTs, safe SQLite deadlines, abstentions/metrics, overlap audit and all five notebook smoke executions. Native XGrammar compilation and full-system pretrained benchmarking untested. |
-
-The complete suite passes **197 tests with no skips** in the isolated HF/CPU environment. The dependency-light system Python suite passes with **18 explicitly skipped dependency-required tests**. The standalone smoke runner passes all six suites without asserting a benchmark target. All five notebooks validate with nbformat and all 45 Python source/test/script files compile in memory. `pip check` reports no broken dependencies in the isolated environment. Final test output is retained in `notebooks/hf-suite.log`, `notebooks/cpu-suite.log` and `notebooks/smoke-validation.log`.
-
-No full pretrained-model training, Kaggle run, CUDA/bitsandbytes operation, T4 memory bound, native XGrammar compilation or research benchmark result is asserted. Those are the remaining target-environment acceptance checks.
+Historical implementation inventory, exact CPU environments, retained validation logs and unresolved acceptance checks are maintained in [KAGGLE_TRAINING_STATUS.md](KAGGLE_TRAINING_STATUS.md#3-recorded-test-results). Those recorded checks include notebook syntax/nbformat validation, in-memory Python compilation and dependency consistency. They are prior CPU evidence, not a new run performed while editing this guide. Native tiny-model CPU training/export/resume is tested; full Qwen3-Embedding-0.6B, Llama 3B/optional 7B and ModernBERT-large Kaggle GPU training, CUDA/NF4, native XGrammar, convergence, T4 fit and benchmark quality remain unverified.
