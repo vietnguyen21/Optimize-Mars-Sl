@@ -34,6 +34,25 @@ class TestExtractPlan(unittest.TestCase):
         self.assertTrue(self._plan("SELECT a FROM t GROUP BY a HAVING COUNT(*) > 1;")["having"])
 
 
+@unittest.skipUnless(HAS_SQLGLOT, "needs sqlglot")
+class TestParsePlan(unittest.TestCase):
+    GOOD = ('{"aggregation":"COUNT","group_by":true,"having":false,"order_by":true,"direction":"DESC",'
+            '"limit":true,"distinct":false,"subquery":false}')
+
+    def _parse(self, text):
+        from src.common.query_plan import parse_plan
+        return parse_plan(text)
+
+    def test_accepts_valid_plan_inside_text(self):
+        self.assertEqual(self._parse("Here: " + self.GOOD + " done")["direction"], "DESC")
+
+    def test_rejects_bad_output(self):
+        self.assertIsNone(self._parse("no json"))
+        self.assertIsNone(self._parse('{"aggregation":"COUNT"}'))
+        self.assertIsNone(self._parse(self.GOOD.replace('"COUNT"', '"MEDIAN"')))
+        self.assertIsNone(self._parse(self.GOOD.replace('"limit":true', '"limit":"yes"')))
+
+
 class TestPlanPrompt(unittest.TestCase):
     def test_plan_is_optional(self):
         self.assertNotIn("<plan>", build_prompt("q", "", "ddl"))

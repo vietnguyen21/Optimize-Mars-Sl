@@ -6,11 +6,13 @@ except in an explicitly labelled oracle experiment.
 """
 
 import json
-from typing import Dict, Any
+import re
+from typing import Dict, Any, Optional
 
 import sqlglot
 from sqlglot import exp
 
+PLAN_FIELDS = ("aggregation", "group_by", "having", "order_by", "direction", "limit", "distinct", "subquery")
 AGGREGATIONS = ((exp.Count, "COUNT"), (exp.Sum, "SUM"), (exp.Avg, "AVG"), (exp.Min, "MIN"), (exp.Max, "MAX"))
 
 
@@ -50,3 +52,23 @@ def extract_plan(sql: str) -> Dict[str, Any]:
 
 def format_plan(plan: Dict[str, Any]) -> str:
     return json.dumps(plan, separators=(",", ":"))
+
+
+def parse_plan(text: str) -> Optional[Dict[str, Any]]:
+    """Validates planner output: first JSON object, exact keys, allowed values. None if invalid."""
+    match = re.search(r"\{.*?\}", text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        plan = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(plan, dict) or set(plan) != set(PLAN_FIELDS):
+        return None
+    if plan["aggregation"] not in ("NONE", "COUNT", "SUM", "AVG", "MIN", "MAX"):
+        return None
+    if plan["direction"] not in ("NONE", "ASC", "DESC"):
+        return None
+    if not all(isinstance(plan[f], bool) for f in PLAN_FIELDS if f not in ("aggregation", "direction")):
+        return None
+    return {f: plan[f] for f in PLAN_FIELDS}
