@@ -1,8 +1,53 @@
 # Kaggle training status — Optimize-Mars-Sl
 
-Status recorded: 2026-11-06. This report describes the current local implementation and the validation logs retained in this repository. It does not certify a successful Kaggle run.
+Status updated: 2026-11-11 (checkpoint synchronization); earlier training evidence recorded 2026-11-06. This report describes the current local implementation and the validation logs retained in this repository. It does not certify a successful Kaggle run.
 
 **Implemented and CPU-validated:** real training objectives, native tiny-model training/export/resume, and independent evaluation code. **Not yet accepted on target hardware:** full-size pretrained training, CUDA/NF4 operation, native XGrammar, and measured T4 memory/latency. Historical scaffold accuracy claims in older project documents are not benchmark evidence.
+
+## Cập nhật đồng bộ checkpoint — 2026-11-11
+
+**Đã hoàn thiện local và sẵn sàng kiểm thử Kaggle ban đầu có giám sát; chưa production-ready.** Chưa thực hiện upload/download Hugging Face thật, chạy GPU Kaggle, NF4/CUDA hoặc thử kill runtime thật. Các kết quả dưới đây là lần chạy mới; các bảng 197 tests trong mục 3 là bằng chứng lịch sử trước thay đổi này.
+
+| Kiểm tra chạy lại | Kết quả chính xác |
+|---|---|
+| `python -m unittest discover -s tests -v` — Python hệ thống 3.14.10 | 219 tests, 199 passed, 20 skipped do thiếu native Torch/HF/SQLGlot; 0 failures/errors; 1.234s |
+| Cùng lệnh bằng `/tmp/optimize-mars-validation/bin/python` | 219 tests, tất cả passed, 0 skipped/failures/errors; 4.645s |
+| `python scripts/run_smoke_tests.py` | Cả 6 suites passed; 1.037s; CPU plumbing, không phải benchmark |
+| Biên dịch cú pháp trong bộ nhớ | 47 file Python trong src/tests/scripts passed |
+| `nbformat.validate` + AST code cell | Cả 5 notebook 01–05 passed; smoke execution cũng nằm trong suite |
+| `pip check` trong môi trường native | No broken requirements found |
+| `git diff --check` | Passed |
+
+Môi trường native: Python 3.14.10, torch 2.15.0+cpu, transformers 4.51.3, PEFT 0.15.2, sentence-transformers 4.1.0, huggingface_hub 0.36.2, SQLGlot 26.16.4, nbformat 5.10.4. Không coi đây là xác nhận bộ requirements GPU trên Kaggle. Logs của lần kiểm tra ở `/tmp/checkpoint-system-suite.log`, `/tmp/checkpoint-native-suite.log`, `/tmp/checkpoint-smoke.log` trong workspace phiên này; các log cũ trong notebooks vẫn giữ nguyên.
+
+Đã thêm 22 tests: 21 test giao thức/backend và một test native SFT+JEPA/GRPO đi qua Hub giả lập. Bao phủ complete-only upload, lỗi partial/unpublished blobs, mất phản hồi sau commit, interrupted download/retry hữu hạn, manifest SHA-256 và file size, malformed/path traversal rejection, discovery/fallback và session output mới, optimizer/scheduler/scaler/RNG/JEPA cursor restoration, dataset/config mismatch, duplicate upload, concurrent commit revision conflict, repo/stage/experiment isolation, private-only preflight, tài khoản ghi namespace, download chỉ đọc khác tài khoản và Kaggle Secret/env token không lộ trong logs. Test native so trọng số resume với run liên tục; GRPO session B không còn đường dẫn SFT/output gốc và vẫn giữ reference adapter đúng byte. Scheduler runtime được test; các runner hiện không tạo scheduler. AMP/CUDA scaler và CUDA RNG thực tế vẫn cần GPU.
+
+File triển khai của thay đổi này:
+
+| File | Thay đổi |
+|---|---|
+| `src/training/checkpoint_sync.py` (mới) | Private HF backend, owner claim/CAS, manifest/hash, commit nguyên tử, retry, download pinned revision + staging, local/remote/auto/explicit resume, hook theo invocation và helper handoff chỉ đọc |
+| `src/training/runtime.py` | Manifest trước công bố local checkpoint; hook sync sau COMPLETE/rename; kiểm tra integrity/step và contract trước restore model/optimizer; giữ định dạng state hiện có |
+| `src/training/kaggle.py` | Preflight privacy/ownership và hiển thị step local/remote hoàn tất trước model load; smoke không kết nối |
+| `src/training/train_embedding.py` | Scope sync cho Grounding và validate resume contract trước restore |
+| `src/training/train_sft_generator.py` | Scope sync cho SFT/JEPA; giữ predictor và data cursor/resume contract |
+| `src/training/train_grpo_generator.py` | Scope sync cho GRPO; dùng reference trong checkpoint resume thay cho SFT path của phiên cũ |
+| `src/training/train_decision_model.py` | Scope sync cho System-1; validate contract trước restore |
+| `notebooks/01_data_preparation_and_embedding.ipynb` | Preflight, cấu hình resume và hướng dẫn backup/khôi phục |
+| `notebooks/02_sft_and_jepa_training_3b.ipynb` | Tích hợp tương tự cho SFT/JEPA |
+| `notebooks/03_grpo_training_3b_and_7b.ipynb` | Tích hợp tương tự cho GRPO/reference |
+| `notebooks/04_system1_laya421m_training.ipynb` | Tích hợp tương tự cho System-1 |
+| `tests/test_checkpoint_sync.py` (mới) | Backend và recovery tests dùng Hub giả lập |
+| `tests/test_generation_training.py` | Native tiny PEFT SFT/JEPA + GRPO remote/session recovery regression |
+| `requirements-kaggle.txt` | Pin `huggingface-hub==0.36.2`, trùng môi trường native đã test |
+| `KAGGLE.md` | Hướng dẫn tiếng Việt cả 3 thành viên, security/storage/errors, handoff khác account và checklist upload/resume hai phiên |
+| `KAGGLE_TRAINING_STATUS.md` | Trạng thái, bằng chứng kiểm thử mới và các giới hạn còn lại |
+
+Không sửa Notebook 05 để ghi checkpoint; operator có thể chủ động tải bằng `download_checkpoint_artifact` chỉ đọc. Không sửa legacy Drive callbacks vì custom Kaggle loops dùng hook runtime chung; hành vi local cũ được giữ. Không tạo/chuyển branch, commit, push hoặc xóa checkpoint/research artifact.
+
+Giới hạn vận hành: `owner.json` ngăn tài khoản HF khác ghi chung namespace, không khóa toàn phiên giữa hai process dùng chung tài khoản; mỗi run song song phải có ID riêng. Download xác minh có thể tăng traffic/cache/dung lượng; sync là synchronous và không thể tiếp tục sau process kill. `warn` có thể hoàn tất training dù backup thất bại, cần kiểm tra log cuối. Legacy checkpoint không có manifest chỉ có completeness + contract cũ, phải tin nguồn và lưu update mới để tạo backup chuẩn. `final/`, calibration metadata, index/schema graph và split/report ngoài checkpoint không tự upload; phải bảo quản riêng. Unsaved/unuploaded updates có thể mất.
+
+Checklist Kaggle hai phiên, cấu hình chính xác và hướng dẫn riêng từng thành viên: [KAGGLE.md — Đồng bộ checkpoint](KAGGLE.md#đồng-bộ-checkpoint-tự-động-lên-hugging-face--hướng-dẫn-cho-3-thành-viên).
 
 ## 1. Implemented features
 
@@ -74,7 +119,7 @@ Inspect skip counts. A dependency-light pass is not equivalent to the native-mod
 | Constrained grammar | Default `posthoc` mode rejects invalid outputs after sampling; it is not token masking. Optional `xgrammar` uses native masks for a restricted SELECT grammar, not full SQLite. Native compilation/tokenizer integration remains untested; CTEs/window functions and other valid SQL forms may be excluded. |
 | Data and calibration | Real datasets, sampled candidates and scientifically appropriate splits must be supplied. No full research dataset, trained production checkpoint, target ECE or benchmark result was created. Candidate training requires both correct and incorrect examples. |
 | Leakage audit | Evaluation checks supplied `TRAINING_DATA_PATHS`; without them it records that overlap was not audited. Checks are not a substitute for dataset provenance and normalized deduplication. |
-| Persistence | Local checkpoints are real, but `/kaggle/working` is ephemeral. Automatic Kaggle cloud synchronization is not implemented. Save/download outputs before ending a session. |
+| Persistence | Opt-in private HF Hub checkpoint synchronization is implemented for 01–04 with atomic commits, manifests/checksums, bounded retries and remote resume. Real Hub/Kaggle integration remains unverified. `/kaggle/working` is ephemeral; inference exports/reports require separate preservation. |
 | Re-running completed outputs | Checkpoints are immutable; Grounding/System-1 final exports and evaluation reports protect existing destinations. Use new experiment output roots, including when extending a completed training run. |
 
 No EX, VSR, ECE, latency or VRAM research target has been demonstrated by the CPU checks.
@@ -268,8 +313,8 @@ os.environ['KAGGLE_OUTPUT_DIR'] = '/kaggle/working/recovered-experiment'
 os.environ['RESUME_FROM_CHECKPOINT'] = '/kaggle/input/previous-run/train/sft_jepa_3b/checkpoint-100'
 ```
 
-Use the appropriate stage checkpoint, unchanged data/objective/seed contracts and a sufficient epoch/update budget. `latest` searches the current stage output directory; it does not discover arbitrary attached datasets. Reattach base weights and original SFT artifacts for GRPO as required. Use trusted training-state files, since optimizer/RNG recovery uses serialized Python state.
+Use the appropriate stage checkpoint, unchanged data/objective/seed contracts and a sufficient epoch/update budget. `latest` searches the current stage output directory; it does not discover arbitrary attached datasets. Reattach base weights; complete GRPO resume checkpoints contain their original immutable reference adapter, so the original SFT path is unnecessary. Use trusted training-state files, since optimizer/RNG recovery uses serialized Python state.
 
-Grounding, SFT and System-1 can run independently on legitimate team accounts using versioned input artifacts. GRPO depends on SFT; full evaluation depends on Grounding + Generation + System-1. Export the entire stage directory, save/download Kaggle outputs before the session ends, then attach those saved outputs downstream. Share artifacts through normal Kaggle mechanisms and record input versions, configurations and source checkpoint identities. No automatic persistent-storage transfer is performed by these notebooks.
+Grounding, SFT and System-1 can run independently on legitimate team accounts using versioned input artifacts. GRPO depends on SFT; full evaluation depends on Grounding + Generation + System-1. Export the entire stage directory, save/download Kaggle outputs before the session ends, then attach those saved outputs downstream. Share artifacts through normal Kaggle mechanisms and record input versions, configurations and source checkpoint identities. Automatic private HF checkpoint transfer is now opt-in for notebooks 01–04; see the Vietnamese guide in KAGGLE.md. Inference exports and reports still require separate handoff.
 
 Further reference: [KAGGLE.md](KAGGLE.md). The remaining completion gate is measured real-mode execution of every stage on the target Kaggle GPU environment, followed by independent held-out evaluation.

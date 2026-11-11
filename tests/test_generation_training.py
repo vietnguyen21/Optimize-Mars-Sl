@@ -341,5 +341,87 @@ class TestNativeLlamaPeftTraining(unittest.TestCase):
             self.assertTrue(any(not torch.equal(final[key], value) for key, value in original.items()))
 
 
+    def test_private_hub_sft_and_grpo_resume_into_new_session(self):
+        """Native PEFT/JEPA recovery over the mocked Hub, with original paths absent."""
+        import os
+        from test_checkpoint_sync import Hub
+        from safetensors.torch import load_file
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = self._local_base(root)
+            data = root/'sft.json'
+            data.write_text(json.dumps([dict(question=f'Q {i}', schema='CREATE TABLE t(x);',
+                answer='SELECT x FROM t;') for i in range(4)]))
+            hub = Hub(root/'cache')
+            env = dict(CHECKPOINT_SYNC_ENABLED='1', CHECKPOINT_HF_REPO_ID='member2/private',
+                CHECKPOINT_EXPERIMENT_ID='sft-jepa-test', HF_TOKEN='test-secret',
+                CHECKPOINT_SYNC_FAILURE_POLICY='stop', CHECKPOINT_RESUME_SOURCE='none')
+            common = dict(data_path=str(data), model_name_or_path=str(base), device='cpu',
+                epochs=3, max_length=256, lora_rank=2, gradient_accumulation_steps=2,
+                lambda_jepa=0.7, predictor_dim=4, loss_dropout=0.5, learning_rate=0.001,
+                save_steps=1, seed=42)
+            def download(repo, filename, **kwargs):
+                return hub.download(filename, kwargs['revision'])
+            with patch.dict(os.environ, env), \
+                 patch('huggingface_hub.HfApi', return_value=hub), \
+                 patch('huggingface_hub.hf_hub_download', side_effect=download):
+                full = run_sft_training(output_dir=str(root/'sft-full'), max_steps=3,
+                    **common)
+                # Independent baseline uses its own namespace.
+                os.environ['CHECKPOINT_EXPERIMENT_ID'] = 'sft-jepa-split'
+                split = run_sft_training(output_dir=str(root/'session-a'), max_steps=1,
+                    **common)
+                # No output checkpoint is handed into session B.
+                Path(root/'session-a').rename(root/'archived-session-a')
+                os.environ['CHECKPOINT_RESUME_SOURCE'] = 'remote'
+                resumed = run_sft_training(output_dir=str(root/'session-b'), max_steps=3,
+                    **common)
+                full_state = torch.load(Path(full['checkpoint_path'])/'training_state.pt', weights_only=False)
+                resumed_state = torch.load(Path(resumed['checkpoint_path'])/'training_state.pt', weights_only=False)
+                self.assertEqual(resumed['optimizer_steps'], 3)
+                for key, tensor in full_state['extra']['predictor'].items():
+                    torch.testing.assert_close(tensor, resumed_state['extra']['predictor'][key], rtol=0, atol=0)
+                for key, tensor in load_file(str(Path(full['checkpoint_path'])/'adapter_model.safetensors')).items():
+                    torch.testing.assert_close(tensor, load_file(str(Path(resumed['checkpoint_path'])/'adapter_model.safetensors'))[key], rtol=0, atol=0)
+                # A completed-step resume must not add/overwrite any Hub commit.
+                before = hub.commits
+                again = run_sft_training(output_dir=str(root/'session-c'), max_steps=3,
+                    **common)
+                self.assertEqual(again['optimizer_steps'], 3)
+                self.assertEqual(hub.commits, before)
+
+                grpo_data = root/'grpo.json'
+                grpo_data.write_text(json.dumps([dict(db_id='tiny', question=f'Q {i}',
+                    schema='CREATE TABLE t(x);', SQL='SELECT x FROM t;') for i in range(4)]))
+                dbs = root/'dbs'; dbs.mkdir()
+                conn = sqlite3.connect(dbs/'tiny.sqlite')
+                conn.execute('CREATE TABLE t(x)'); conn.close()
+                def reward(response, *args):
+                    score = sum(map(ord, response)) % 19
+                    return dict(r_format=0., r_exec=0., r_mem=0., r_atomic=float(score), total_reward=float(score))
+                grpo_common = dict(data_path=str(grpo_data), db_dir=str(dbs), device='cpu',
+                    epochs=3, max_length=256, max_new_tokens=4, num_rollouts=4,
+                    learning_rate=0.001, save_steps=1, seed=42)
+                os.environ.update(CHECKPOINT_EXPERIMENT_ID='grpo-full', CHECKPOINT_RESUME_SOURCE='none')
+                with patch('src.training.train_grpo_generator.compute_dense_rewards', side_effect=reward):
+                    grpo_full = run_grpo_training(output_dir=str(root/'grpo-full'), max_steps=2,
+                        sft_checkpoint=resumed['checkpoint_path'], **grpo_common)
+                    os.environ['CHECKPOINT_EXPERIMENT_ID'] = 'grpo-split'
+                    grpo_split = run_grpo_training(output_dir=str(root/'grpo-a'), max_steps=1,
+                        sft_checkpoint=resumed['checkpoint_path'], **grpo_common)
+                    Path(root/'grpo-a').rename(root/'archived-grpo-a')
+                    # Original SFT initialization path also disappears.
+                    Path(root/'session-b').rename(root/'archived-sft')
+                    os.environ['CHECKPOINT_RESUME_SOURCE'] = 'remote'
+                    grpo_resume = run_grpo_training(output_dir=str(root/'grpo-b'), max_steps=2,
+                        sft_checkpoint=str(root/'UNAVAILABLE-original-sft'), **grpo_common)
+                self.assertEqual(grpo_resume['optimizer_steps'], 2)
+                for subpath in ('adapter_model.safetensors', 'reference/adapter_model.safetensors'):
+                    expected = load_file(str(Path(grpo_full['checkpoint_path'])/subpath))
+                    actual = load_file(str(Path(grpo_resume['checkpoint_path'])/subpath))
+                    for key, tensor in expected.items():
+                        torch.testing.assert_close(tensor, actual[key], rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     unittest.main()

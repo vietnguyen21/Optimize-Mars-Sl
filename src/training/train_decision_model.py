@@ -440,6 +440,10 @@ def split_candidate_groups(records, seed=42):
     return splits
 
 
+from src.training.checkpoint_sync import persistent_training
+
+
+@persistent_training('system1')
 def _train_decision(data_path, output_dir, export_dir=None, model_name_or_path='answerdotai/ModernBERT-large',
                     calibration_path=None, test_path=None, max_steps=None, epochs=3, lr_backbone=1e-5,
                     lr_head=1e-4, alpha_cal=0.5, target_ece=0.081, max_length=512,
@@ -508,7 +512,7 @@ def _train_decision(data_path, output_dir, export_dir=None, model_name_or_path='
         path = latest_checkpoint(output_dir) if resume_from_checkpoint=='latest' else resume_from_checkpoint
         if path is None:
             raise FileNotFoundError('No complete decision checkpoint to resume')
-        state=load_checkpoint(path,model,optimizer,scaler=scaler)
+        state=load_checkpoint(path,model,optimizer,scaler=scaler,expected_extra={"contract":contract})
         if state.get('extra',{}).get('contract') != contract:
             raise ValueError('System-1 resume data/config differ from saved checkpoint')
         step=state['step']

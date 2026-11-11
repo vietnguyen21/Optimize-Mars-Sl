@@ -399,6 +399,10 @@ def evaluate_retrieval(model, cards, examples, top_k=10):
     return {'recall_at_k': found / total, 'hit_at_k': hits / len(examples), 'k': top_k, 'questions':len(examples)}, vectors
 
 
+from src.training.checkpoint_sync import persistent_training
+
+
+@persistent_training('grounding')
 def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_path='data/mini/mini_bird.jsonl',
                            output_dir='outputs/embedding', model_name_or_path='Qwen/Qwen3-Embedding-0.6B',
                            db_dir=None, eval_path=None, dry_run=False, margin=0.1, temperature=0.05,
@@ -450,7 +454,7 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
         path = latest_checkpoint(output_dir) if resume_from_checkpoint == 'latest' else resume_from_checkpoint
         if path is None:
             raise FileNotFoundError('No complete embedding checkpoint to resume')
-        state = load_checkpoint(path, model, optimizer, scaler=scaler)
+        state = load_checkpoint(path, model, optimizer, scaler=scaler, expected_extra={"contract": contract})
         if state.get('extra', {}).get('contract') != contract:
             raise ValueError('Embedding resume data/config differ from saved checkpoint')
         step = state['step']

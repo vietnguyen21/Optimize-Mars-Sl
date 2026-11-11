@@ -583,6 +583,10 @@ def _activate_adapter(model, name):
             parameter.requires_grad_(False)
 
 
+from src.training.checkpoint_sync import persistent_training
+
+
+@persistent_training('grpo_3b')
 def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
     output_dir=None, drive_dir=None, num_rollouts=4, epochs=2,
     learning_rate=5e-6, dry_run=False, **kwargs):
@@ -605,6 +609,9 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
     from src.training.train_sft_generator import _optimizer_update, _resolve_resume, _generation_extra
     import sqlglot  # Required for genuine atomic AST rewards, optional only in smoke mode.
     sft_checkpoint = kwargs.get("sft_checkpoint", kwargs.get("adapter_path"))
+    initial_resume = kwargs.get("resume_from_checkpoint")
+    if initial_resume and (Path(initial_resume) / "reference" / "adapter_config.json").is_file():
+        sft_checkpoint = str(Path(initial_resume) / "reference")
     if not sft_checkpoint or not (Path(sft_checkpoint) / "adapter_config.json").is_file():
         raise ValueError("GRPO requires sft_checkpoint pointing to an exported SFT PEFT adapter")
     output_dir = output_dir or "/kaggle/working/grpo_3b"
@@ -650,7 +657,8 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
     logger = ExperimentLogger(output_dir, dict(stage="grpo", mode="train", **contract))
     step, first_epoch, first_index = 0, 0, 0
     if resume:
-        state = load_checkpoint(resume, model, optimizer, scaler=scaler)
+        state = load_checkpoint(resume, model, optimizer, scaler=scaler,
+            expected_extra=dict(kind='grpo', dataset_fingerprint=fingerprint, contract=contract))
         extra = state["extra"]
         if extra.get("kind") != "grpo" or extra.get("dataset_fingerprint") != fingerprint or extra.get("contract") != contract:
             raise ValueError("Resume checkpoint belongs to another GRPO dataset/configuration")

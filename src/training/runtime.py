@@ -123,20 +123,34 @@ def save_checkpoint(output_dir, model, optimizer, step, *, scaler=None, schedule
                  scheduler=scheduler.state_dict() if scheduler else None, extra=extra or {})
     torch.save(state, path / 'training_state.pt')
     (path / 'COMPLETE').write_text('complete\n')
+    from src.training.checkpoint_sync import ACTIVE_SYNC
+    sync = ACTIVE_SYNC.get()
+    if sync is not None:
+        sync.prepare_manifest(path, step, extra or {})
+    # COMPLETE remains the last file written; staging is never discoverable.
+    (path / 'COMPLETE').write_text('complete\n')
     if destination.exists():
         raise FileExistsError(f'Checkpoint already exists: {destination}')
     path.rename(destination)
+    if sync is not None:
+        sync.completed(destination, step, extra or {})
     return str(destination)
 
 
-def load_checkpoint(path, model, optimizer=None, *, scaler=None, scheduler=None):
+def load_checkpoint(path, model, optimizer=None, *, scaler=None, scheduler=None, expected_extra=None):
     """Load trusted local training checkpoints only; includes Python/NumPy RNG pickle."""
     import numpy as np
     import torch
     p = Path(path)
     if not (p / 'COMPLETE').exists():
         raise ValueError(f'Incomplete checkpoint: {path}')
+    from src.training.checkpoint_sync import verify
+    manifest = verify(p)
     state = torch.load(p / 'training_state.pt', map_location='cpu', weights_only=False)
+    if manifest and state.get('step') != manifest['step']:
+        raise ValueError('Training state step differs from manifest')
+    if expected_extra and any(state.get('extra', {}).get(k) != v for k, v in expected_extra.items()):
+        raise ValueError('Resume checkpoint dataset/configuration mismatch')
     if state['model'] is not None:
         model.load_state_dict(state['model'])
     elif (p / 'adapter_config.json').exists():

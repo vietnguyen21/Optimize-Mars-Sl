@@ -11,3 +11,6 @@ sqlglot==26.16.4
 pydantic==2.11.3
 nbformat==5.10.4
 # Optional constrained decoding: install xgrammar separately, then use constraint_mode='xgrammar'.
+
+# Atomic commits, revision-pinned downloads and private repository inspection.
+huggingface-hub==0.36.2

@@ -455,6 +455,10 @@ def run_dry_run(
     }
 
 
+from src.training.checkpoint_sync import persistent_training
+
+
+@persistent_training('sft_jepa_3b')
 def run_sft_training(
     data_path="data/mini/mini_synsql.jsonl", output_dir="/kaggle/working/sft_jepa_3b",
     drive_dir=None, epochs=3, batch_size=1, learning_rate=2e-4,
@@ -521,7 +525,8 @@ def run_sft_training(
         dropped_overlength=dropped, examples=len(encoded)))
     step, first_epoch, first_batch = 0, 0, 0
     if resume:
-        state = load_checkpoint(resume, model, optimizer, scaler=scaler)
+        state = load_checkpoint(resume, model, optimizer, scaler=scaler,
+            expected_extra=dict(kind='sft', dataset_fingerprint=fingerprint, contract=contract))
         extra = state["extra"]
         if extra.get("kind") != "sft" or extra.get("dataset_fingerprint") != fingerprint or extra.get("contract") != contract:
             raise ValueError("Resume checkpoint belongs to a different SFT dataset/configuration")

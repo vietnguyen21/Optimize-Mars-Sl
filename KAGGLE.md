@@ -177,14 +177,14 @@ On OOM, restart the kernel to release stale models, run only one stage/process o
 | 04 | `train/system1/` | `DECISION_CHECKPOINT=.../train/system1/final` |
 | 05 | `train/evaluation/` | `metrics.json`, `benchmark_summary.md`, `logs/evaluation_results.jsonl` |
 
-1. Before the session ends, save a Kaggle notebook version retaining outputs or download the **entire stage directory**, including logs/environment, complete checkpoints, tokenizers, final exports and GRPO `reference/`. `/kaggle/working` is ephemeral; no automatic cloud transfer exists.
+1. Before the session ends, save a Kaggle notebook version retaining outputs or download the **entire stage directory**, including logs/environment, complete checkpoints, tokenizers, final exports and GRPO `reference/`. `/kaggle/working` is ephemeral; enable the HF checkpoint backend below for automatic backups. Keep inference exports and reports separately.
 2. Publish the saved outputs as a private, versioned Kaggle Dataset accessible to the other two team accounts through normal sharing permissions. Record repository/data versions, configuration, source checkpoint identity and checksums. Share authorized adapters, not gated base weights without the required rights.
 3. The recipient attaches that Dataset, inspects its actual directory layout, and updates paths accordingly; upload layouts may add a parent folder. Attach original training inputs and identical base weights separately. Test loading the shared artifact in a fresh session before marking the handoff accepted.
 4. Preserve `COMPLETE` markers and `training_state.pt` for recovery; use only trusted team optimizer-state artifacts. `final/` is an inference export for Grounding/System-1, not their optimizer-resume checkpoint. Never point downstream model loading at a stage root when a final/checkpoint directory is required.
 
 ### Fresh training and recovery examples
 
-Fresh training means a new output root with `RESUME_FROM_CHECKPOINT` unset. Downloading pretrained base weights is still fresh task training. Every SFT ablation starts fresh; GRPO initializes from SFT but starts its own optimizer unless resuming GRPO.
+Fresh training means a new output root/experiment ID with `CHECKPOINT_RESUME_SOURCE=none` and `RESUME_FROM_CHECKPOINT` unset. Downloading pretrained base weights is still fresh task training. Every SFT ablation starts fresh; GRPO initializes from SFT but starts its own optimizer unless resuming GRPO.
 
 ```python
 # Fresh experiment (apply before setup in the relevant notebook).
@@ -207,7 +207,7 @@ os.environ.update({
 })
 ```
 
-Use the actual saved step and keep data bytes, model identity, seed and objective/length contracts unchanged. A new root is necessary when extending completed Grounding/System-1 runs because existing `final/` destinations are protected. SFT/GRPO also respect their epoch ceilings: a checkpoint at the final default epoch will not become a longer run just by raising `MAX_STEPS`. Resume GRPO from a GRPO checkpoint while retaining its original `SFT_CHECKPOINT` and base access; an SFT checkpoint is not a GRPO recovery state. Incomplete hidden staging directories are ignored. `latest` does not search attached datasets. Do not remove completion checks or overwrite immutable checkpoints to bypass a failure.
+Use the actual saved step and keep data bytes, model identity, seed and objective/length contracts unchanged. A new root is necessary when extending completed Grounding/System-1 runs because existing `final/` destinations are protected. SFT/GRPO also respect their epoch ceilings: a checkpoint at the final default epoch will not become a longer run just by raising `MAX_STEPS`. Resume GRPO from a complete GRPO checkpoint containing its immutable `reference/` adapter, with base access; an SFT checkpoint is not a GRPO recovery state. Incomplete hidden staging directories are ignored. `latest` does not search attached datasets. Do not remove completion checks or overwrite immutable checkpoints to bypass a failure.
 
 ### Smoke and real-training acceptance checklists
 
@@ -322,13 +322,130 @@ SFT constructs prompt and completion token sequences separately, masks all promp
 
 GRPO starts from the trained SFT adapter, samples groups from the model, evaluates existing format/execution/reasoning/atomic rewards, and computes token-level relative advantages and policy/KL gradients. A frozen SFT reference adapter shares the quantized backbone. Zero reward variance produces zero advantages; logs expose these groups and skip their reward policy update. Dense reward heads do not mathematically guarantee nonzero variance. The reasoning reward is the existing lexical reasoning-bank similarity, not an added pretrained semantic judge. Vary group size and reward composition only with separate logged configurations.
 
-## Checkpoint persistence and recovery
+## Đồng bộ checkpoint tự động lên Hugging Face — hướng dẫn cho 3 thành viên
 
-Each checkpoint is first written to a unique hidden staging directory and published by rename only after completion. Interrupted staging directories are preserved for inspection and never chosen by automatic recovery. Every custom-loop `checkpoint-N` contains native model or PEFT weights, tokenizer where applicable, `training_state.pt` with optimizer/scaler/RNG/objective/data cursor state, and a `COMPLETE` marker written last. Resume accepts only complete checkpoints. Dataset fingerprints and training contracts prevent accidental continuation on different data/objectives. Pickle-based optimizer state must come from a trusted local or team artifact. Checkpoints are immutable and are never automatically pruned. Final Grounding/System-1 exports refuse an existing destination; use a fresh output root or preserve the old export before extending a run.
+Cơ chế này đã có kiểm thử local với Hub giả lập và tiny model CPU; **chưa chạy upload/download Hub thật hoặc Kaggle GPU**. Có thể bắt đầu kiểm thử Kaggle có giám sát theo checklist dưới đây; chưa được coi là production-ready.
 
-Set `RESUME_FROM_CHECKPOINT=latest` for the current output directory, or an explicit attached checkpoint directory for a new Kaggle session. The next checkpoint is written to the configurable new output directory. Download outputs or save a notebook version **before a session ends**; `/kaggle/working` is ephemeral. Saving a checkpoint locally is not cloud synchronization. Interrupted incomplete checkpoints remain for inspection and are ignored by automatic discovery.
+### 1. Tạo kho riêng tư và Secret
 
-Grounding, SFT and System-1 can run independently on separate legitimate team accounts using the same versioned inputs and configuration. Share their saved output datasets through normal Kaggle mechanisms; do not depend on another account's live session or use extra accounts to evade service limits. GRPO attaches the SFT artifact, and evaluation attaches Generation+System-1+Grounding artifacts. Record source dataset versions/checkpoint hashes in experiment records.
+1. Mỗi thành viên tạo một **Model repository, Private** trên Hugging Face, ví dụ `ten-m1/mars-checkpoints`, `ten-m2/mars-checkpoints`, `ten-m3/mars-checkpoints`. Không dùng repository GitHub chứa mã nguồn. Backend không tự tạo repo; tạo repo có README/commit đầu tiên trước khi chạy.
+2. Tại HF Settings → Access Tokens, tạo token có quyền **write** vào đúng repo. Nếu dùng fine-grained token, cấp cả quyền đọc nội dung và quyền ghi repo đích. Không dùng token của người khác để ghi cùng thí nghiệm.
+3. Trong Kaggle → Add-ons → Secrets, thêm `HF_TOKEN`, dán token vào giá trị Secret và bật quyền truy cập cho notebook. Không dán token vào cell, JSON cấu hình hoặc dataset. Ngoài Kaggle, có thể cung cấp biến môi trường `HF_TOKEN` qua secret manager; biến môi trường theo tên `CHECKPOINT_HF_TOKEN_SECRET` được ưu tiên, rồi mới đọc Kaggle Secrets.
+4. Bật Internet cho notebook. Preflight xác minh `private is True`, xác định tài khoản HF và giữ namespace cho tài khoản đó **trước khi tải model/training**. Repo public, không xác minh được privacy hoặc namespace thuộc tài khoản khác đều dừng an toàn, kể cả policy `warn`.
+
+Tham khảo chính thức: [HF tạo repo private và quyền token](https://huggingface.co/docs/huggingface_hub/quick-start), [commit nguyên tử và `parent_commit`](https://huggingface.co/docs/huggingface_hub/package_reference/hf_api#huggingface_hub.HfApi.create_commit). Không cần git clone/login vào GitHub hoặc lưu token trong git credentials. Token checkpoint chỉ truyền trực tiếp vào HF API, không tự đăng nhập cho tải base model gated; Member 2 vẫn cần cấp quyền base model và xác thực riêng theo hướng dẫn ở trên.
+
+### 2. Cấu hình chung trước cell setup
+
+```python
+import os
+os.environ.update({
+    'CHECKPOINT_SYNC_ENABLED': '1',
+    'CHECKPOINT_SYNC_BACKEND': 'hf_hub',
+    'CHECKPOINT_HF_REPO_ID': 'ten-m1/mars-checkpoints',  # thay bằng repo của mình
+    'CHECKPOINT_HF_TOKEN_SECRET': 'HF_TOKEN',         # tên Secret, không phải token
+    'CHECKPOINT_EXPERIMENT_ID': 'm1-grounding-seed42-v1',
+    'CHECKPOINT_SYNC_EVERY_N_SAVES': '1',
+    'CHECKPOINT_RESUME_SOURCE': 'auto',
+    'CHECKPOINT_SYNC_FAILURE_POLICY': 'warn',
+    'SAVE_STEPS': '25',
+})
+os.environ.pop('RESUME_FROM_CHECKPOINT', None)  # không để override cũ che chế độ auto
+```
+
+`CHECKPOINT_SYNC_ENABLED` mặc định `0` để giữ luồng local/offline cũ. Khi bật sync, phải đặt repo và ID; các giá trị mặc định còn lại là `hf_hub`, `HF_TOKEN`, `1`, `none`, `warn`. Muốn tự phục hồi phải đặt `CHECKPOINT_RESUME_SOURCE=auto` rõ ràng. `RESUME_FROM_CHECKPOINT` nếu có sẽ ưu tiên hơn biến này. `CHECKPOINT_SYNC_MAX_ATTEMPTS` mặc định 3, cho phép 1–6 lần; backoff 1, 2, 4, 8, 16 giây, số lần hữu hạn. Các thư viện HTTP của HF còn có timeout/retry riêng.
+
+| Thành viên | Notebook / stage namespace | Repo riêng và ID đề xuất |
+|---|---|---|
+| 1 | 01 / `grounding` | `ten-m1/mars-checkpoints`, `m1-grounding-seed42-v1` |
+| 2 | 02 / `sft_jepa_3b` | `ten-m2/mars-checkpoints`, `m2-sft-only-seed42-v1` hoặc `m2-sft-jepa-seed42-v1` |
+| 2 | 03 / `grpo_3b` | repo của Member 2, `m2-grpo-from-jepa-seed42-v1` |
+| 3 | 04 / `system1` | `ten-m3/mars-checkpoints`, `m3-modernbert-seed42-v1` |
+
+Remote path là `checkpoints/<experiment-id>/<stage>/checkpoint-N/`. `owner.json` giữ quyền ghi cho **tài khoản HF** đã tạo namespace. `parent_commit` ngăn hai commit cạnh tranh ghi đè nhau; checkpoint hoàn tất không bị thay thế. Không chạy đồng thời hai notebook dùng cùng repo/ID/stage, kể cả khi dùng cùng tài khoản HF: cơ chế không khóa độc quyền toàn bộ phiên training. Mỗi seed, ablation, dataset hoặc cấu hình mục tiêu mới phải có ID và output root mới. Member 2 chạy 02 trước 03; GRPO lần đầu cần `SFT_CHECKPOINT`. Khi resume một checkpoint GRPO đầy đủ, runner dùng `reference/` bên trong checkpoint và không cần đường dẫn SFT của phiên cũ.
+
+### 3. Lưu và backup khi training
+
+- `SAVE_STEPS` là số optimizer update giữa hai lần lưu **local**. `CHECKPOINT_SYNC_EVERY_N_SAVES` là số lần lưu local giữa hai lần upload; hai tần suất độc lập. Ví dụ 25 và 2: lưu local mỗi 25 update, upload mỗi 50 update; checkpoint cuối vẫn được thử upload khi runner thành công.
+- Model/adapter, tokenizer khi có, optimizer, scheduler khi dùng, AMP scaler, RNG Python/NumPy/Torch/CUDA, JEPA predictor, step/cursor và resume contract giữ định dạng `training_state.pt` hiện có. Grounding/System-1 suy ra cursor từ step và accumulation; SFT/GRPO lưu epoch/batch cursor. Các runner hiện tại không tạo LR scheduler; runtime vẫn hỗ trợ lưu/khôi phục scheduler nếu được truyền vào.
+- Local staging chứa manifest SHA-256/kích thước từng file, `COMPLETE` được ghi sau cùng, rồi rename công bố checkpoint. Chỉ checkpoint có `COMPLETE` và `training_state.pt` mới đủ điều kiện upload. `checkpoint_manifest.json` ghi step, stage, experiment, compatibility fingerprint, dataset/configuration fingerprint, inventory và `status=complete`.
+- Upload đồng bộ bằng một Hub commit nguyên tử chứa toàn bộ checkpoint và manifest. Blob upload dang dở không có manifest trong cây repo nên không được khám phá. Backend đọc lại file theo commit SHA và kiểm tra checksum trước khi báo `success=true`. Retry sau mất phản hồi commit nhận diện checkpoint đã có, không ghi đè hoặc upload lại payload đã hoàn tất.
+- Log hiển thị thành công/thất bại, step, payload bytes, thời gian và `skipped`. `checkpoint_sync.jsonl` ở stage output giữ log; bytes là kích thước payload logic của commit, không phải số byte HTTP thực tế sau dedup/retry. Việc đọc lại để xác minh có thể cần tải thêm dữ liệu vào HF cache.
+- `warn`: checkpoint local được giữ, in cảnh báo **REMOTE BACKUP UNSUCCESSFUL** và tiếp tục. Training thành công không đồng nghĩa backup thành công; kiểm tra log cuối. `stop`: ném lỗi sau khi đã giữ checkpoint local, không tiếp tục training. Resume thất bại không được tự đổi thành chạy mới từ step 0.
+- Không xóa checkpoint local/remote, không upload dataset hoặc toàn bộ output root. Chỉ upload thư mục checkpoint đã hoàn tất. `final/` của 01/04, index, schema graphs, calibration metadata, dữ liệu split và các báo cáo vẫn cần giữ/bàn giao riêng qua Kaggle outputs hoặc Dataset; chúng không nằm trong backup optimizer checkpoint.
+
+### 4. Bắt đầu mới và resume trong phiên khác
+
+| Giá trị `CHECKPOINT_RESUME_SOURCE` | Hành vi |
+|---|---|
+| `none` | Chạy mới; chọn ID và output mới để không va checkpoint cũ |
+| `local` | Chọn checkpoint local hợp lệ có step cao nhất; thiếu thì báo lỗi |
+| `latest` | Alias tương thích cũ của `local` |
+| `remote` | Bắt buộc tải checkpoint remote tương thích, đầy đủ, checksum đúng; thiếu thì báo lỗi |
+| `auto` | So local/remote, ưu tiên step hoàn tất cao nhất; bằng step ưu tiên local; namespace trống mới được chạy từ đầu |
+| đường dẫn checkpoint | Dùng chính xác thư mục đó, xác minh completeness/integrity/compatibility; không fallback |
+
+Bắt đầu thí nghiệm mới: đặt `CHECKPOINT_RESUME_SOURCE=none`, ID mới và `KAGGLE_OUTPUT_DIR` mới; xóa override `RESUME_FROM_CHECKPOINT` bằng `os.environ.pop`. Không xóa checkpoint cũ.
+
+Resume cùng thí nghiệm trong **phiên Kaggle hoàn toàn mới**: attach cùng snapshot code, dữ liệu/split và base model được cấp quyền; giữ nguyên ID/repo/model/objective/seed/length/accumulation/learning rate. Chỉ tăng `MAX_STEPS` thành tổng update mong muốn và đổi output root:
+
+```python
+os.environ.update({
+    'KAGGLE_OUTPUT_DIR': '/kaggle/working/recovered-session-b',
+    'CHECKPOINT_RESUME_SOURCE': 'remote',  # dùng remote cho kiểm thử xác nhận; auto cho vận hành
+    'MAX_STEPS': '200',
+})
+os.environ.pop('RESUME_FROM_CHECKPOINT', None)
+```
+
+Preflight in latest completed local/remote steps; runner in `resume_checkpoint` và `verified_completed_step`. Thấy step N đã lưu, update tiếp theo phải là N+1; không chấp nhận mất optimizer/cursor hoặc tự về 0. Nếu dataset/config mismatch: dùng lại đúng cấu hình hoặc tạo ID mới, không bỏ kiểm tra. Giữ nguyên đường dẫn model identity trong runner; `BASE_MODEL_PATH` cho phép chuyển vị trí **cùng base model** khi PEFT loader tải adapter. Nếu dùng base local không còn đường dẫn gốc, attach lại đúng model và cấu hình override này. Không đổi base dưới adapter đã train.
+
+SFT/GRPO có giới hạn epoch ngoài `MAX_STEPS`: tăng step cap không kéo dài training đã hết epoch. Muốn kéo dài epoch cần chỉnh lời gọi runner rõ ràng. Grounding/System-1 bảo vệ `final/` đã có, nên dùng output mới khi tiếp tục sau một run hoàn tất. Checkpoint legacy chỉ có marker/state vẫn đọc được qua contract cũ; chưa có manifest/hash ban đầu để xác minh dữ liệu trước đó, nên chỉ dùng artifact đáng tin. Lưu thêm một update sẽ tạo checkpoint chuẩn mới để backup.
+
+### 5. Chia sẻ khác tài khoản và Notebook 05 chỉ đọc
+
+Chia sẻ repo private qua quyền thành viên tổ chức HF phù hợp; repo cá nhân không có quyền cộng tác cần chuyển artifact qua repo tổ chức/private Kaggle Dataset được cấp quyền. Token người nhận phải có quyền đọc repo nguồn. Không trao token cá nhân cho người khác. Người nhận tải bằng helper **chỉ đọc**, không claim namespace, không unpickle state và không ghi vào repo nguồn:
+
+```python
+# Cấu hình CHECKPOINT_SYNC_ENABLED=1, repo/experiment nguồn và Secret có quyền đọc trước.
+from src.training.checkpoint_sync import download_checkpoint_artifact
+checkpoint = download_checkpoint_artifact('/kaggle/working/shared-artifacts', 'sft_jepa_3b')
+# Dùng làm SFT_CHECKPOINT cho lần GRPO đầu, hoặc GENERATOR_CHECKPOINT cho evaluation.
+```
+
+Nếu tiếp tục training từ checkpoint được bàn giao: sau download, đổi `CHECKPOINT_HF_REPO_ID` sang repo người nhận, `CHECKPOINT_EXPERIMENT_ID` sang ID mới, và đặt `RESUME_FROM_CHECKPOINT=checkpoint`. Giữ dữ liệu/cấu hình; update mới được backup vào namespace mới. Nếu chỉ load và không tạo update mới thì checkpoint vẫn thuộc namespace nguồn, không tự đổi nhãn/bản sao. Không dùng `remote` để ghi tiếp trực tiếp namespace của người gửi.
+
+Notebook 05 không gọi preflight có quyền ghi hoặc sync training. Khi cần, operator chủ động gọi helper trên trong cell cấu hình rồi đặt các artifact path. SFT/GRPO adapter checkpoint có thể dùng trực tiếp cho Generation. Grounding/System-1 inference yêu cầu `final/`, index/calibration artifacts riêng; không thay `final/` bằng optimizer checkpoint rồi coi như đã hiệu chỉnh nhiệt độ.
+
+### 6. Lỗi thường gặp, dung lượng và bảo mật
+
+| Triệu chứng | Xử lý |
+|---|---|
+| Token unavailable / Secret bị từ chối | Kiểm tra đúng tên `HF_TOKEN`, quyền Secret cho notebook; không in token để debug |
+| HTTP 401/403 hoặc service failed | Kiểm tra token còn hiệu lực, scope đọc/ghi đúng repo, quyền tổ chức và quyền gated base riêng |
+| HTTP 404 / không xác minh private | Kiểm tra `owner/repo`, loại **Model**, repo đã có commit đầu; repo phải private |
+| Namespace belongs to another account | Dùng read-only download để bàn giao, repo/ID đích mới cho người nhận |
+| Timeout, DNS, Internet tắt | Bật Internet, kiểm tra quota/dịch vụ; retry hữu hạn. `warn` giữ local nhưng không có backup mới |
+| Checksum/manifest mismatch | Không resume artifact lỗi. Chọn checkpoint hoàn tất cũ hơn nếu có, giữ bản lỗi để điều tra |
+| Dataset/configuration mismatch | Attach đúng phiên bản dữ liệu/split, giữ objective/model/seed/length/hyperparameters |
+| Insufficient disk space / ENOSPC | Giảm tần suất lưu phù hợp, tăng dung lượng trước run hoặc chuyển run sang output còn trống; không xóa bản hợp lệ duy nhất |
+| Checkpoint step đã tồn tại | Resume đúng step hoặc output/experiment mới; hệ thống không ghi đè checkpoint đã hoàn tất |
+
+Model full + AdamW có thể lớn hơn adapter rất nhiều. Tính cả checkpoint local, staging và HF cache; tải cần tối thiểu khoảng 2× payload trống và một phần dự phòng, có thể cần thêm nếu cache ở ổ khác. Log sync có thể không ghi được khi ổ đầy; lỗi OS được giữ nguyên để chẩn đoán. Artifact optimizer là pickle: chỉ load từ nhóm/repo đáng tin; checksum xác minh tính toàn vẹn, không chứng minh nguồn đáng tin hay giấy phép phân phối. Dữ liệu/ngữ cảnh nghiên cứu có thể nằm trong model, nên repo luôn private và quyền truy cập tối thiểu. Không bật HTTP debug logging chứa credential bên ngoài ứng dụng.
+
+### 7. Checklist hai phiên Kaggle thật
+
+1. **Chuẩn bị:** chọn notebook được giao, repo private có commit đầu, Secret write đúng repo; attach dữ liệu/base; bật Internet/GPU. Dùng ID thử nghiệm mới, `SAVE_STEPS=1`, sync mỗi save, `MAX_STEPS=2`, policy `stop`, resume `none`. Giữ đủ dữ liệu để có ít nhất 3–4 update trong epoch budget.
+2. **Phiên A:** Save Version → **Save & Run All**. Xác nhận privacy preflight và step tiến 1, 2; xem `checkpoint_sync.jsonl` có `success=true`, step 2 và duration/bytes. Mở HF repo bằng UI, kiểm tra đúng namespace, marker, manifest, state, weights/tokenizer; 03 có `reference/`. Ghi commit SHA và cấu hình, không ghi token.
+3. **Giữ bằng chứng A:** lưu logs/environment/metrics và artifacts `final/`/split riêng nếu có. Không xóa checkpoint. Kết thúc phiên A sau khi upload thành công; không dựa vào trình duyệt mở hoặc background upload sau khi process bị kill.
+4. **Phiên B độc lập:** mở kernel/session mới; không attach output checkpoint A, dùng output root trống khác. Attach cùng code/dữ liệu/base; cùng repo/ID/Secret và cấu hình, đổi `MAX_STEPS=3` hoặc 4, resume **remote**, bỏ `RESUME_FROM_CHECKPOINT`. Với 03 bỏ `SFT_CHECKPOINT` cũ để chứng minh `reference/` tự đủ (base model vẫn bắt buộc).
+5. **Kiểm chứng restore:** latest local phải trống, remote phải 2; `verified_completed_step=2`; update mới từ 3. Kiểm tra state optimizer/scaler/RNG, cursor, JEPA predictor (02 có lambda>0), reference hash (03) và checkpoint 3/4. Không có checkpoint step 0/1 bị ghi lại. Dùng `MAX_STEPS` đủ nhỏ để kiểm tra trước khi chạy dài.
+6. **Kiểm chứng Hub B:** kiểm tra sync cuối thành công và checkpoint mới; checkpoint 2/commit A còn nguyên. Thử rerun với tổng step đã đạt ở output mới để xác nhận không ghi đè. Với 01/04 giữ và so sánh `final/`/calibration output riêng.
+7. **Mô phỏng lỗi có kiểm soát:** trong một run thử riêng, ngắt mạng hoặc dùng token không có quyền ghi sau checkpoint đã lưu; kiểm tra policy `warn`/`stop` và local vẫn còn. Khôi phục quyền/mạng, retry trên checkpoint hoàn tất; không sửa checksum/marker để vượt lỗi.
+8. **Chấp nhận ban đầu:** cả ba thành viên ghi lại version code/packages, GPU/VRAM, commit SHA, duration/dung lượng, start/resume/final steps và kết quả kiểm tra trạng thái. Chỉ sau upload+resume thật mới đánh dấu backend đã được kiểm chứng tích hợp; full-size convergence/benchmark vẫn là cổng đánh giá riêng.
+
+Đồng bộ định kỳ giảm rủi ro mất tiến độ, **không bảo đảm phục hồi optimizer step chưa lưu hoặc checkpoint chưa upload xong**. Kaggle `/kaggle/working` là tạm thời, GPU có giới hạn runtime và mạng có thể mất. Save & Run All chạy phía Kaggle không đòi trình duyệt mở, nhưng process bị kill không thể tiếp tục upload. Luôn chọn khoảng lưu/backup dựa trên thời gian thực đo được và mức tiến độ chấp nhận mất.
+
 
 ## Held-out evaluation
 
