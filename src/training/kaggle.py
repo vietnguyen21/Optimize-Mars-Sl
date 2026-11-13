@@ -45,14 +45,13 @@ def install_dependencies(repo_dir, stage='evaluation'):
         return
     if os.environ.get('INSTALL_DEPS', '0') != '1':
         return
-    from src.training.environment import profile_path, requirements, cuda_stack, validate_torch_build
+    from src.training.environment import profile_path, requirements, cuda_stack, validate_torch_build, validate_python_runtime
     import tempfile
     from packaging.version import Version
-    if not (3, 10) <= sys.version_info[:2] < (3, 13):
-        raise RuntimeError('Bootstrap requires Python 3.10–3.12; validate another profile separately')
+    minimum_torch = validate_python_runtime(stage)
     before = cuda_stack()
-    if 'torch' not in before or not Version('2.5') <= Version(before['torch'].split('+')[0]) < Version('3'):
-        raise RuntimeError('Select an image with CUDA torch >=2.5,<3 before application installation')
+    if 'torch' not in before or not Version(minimum_torch) <= Version(before['torch'].split('+')[0]) < Version('3'):
+        raise RuntimeError(f'Select an image with CUDA torch >={minimum_torch},<3 for Python {sys.version_info[0]}.{sys.version_info[1]} before application installation')
     import torch
     validate_torch_build(torch, before['torch'])
     if torch.version.cuda is None or not torch.cuda.is_available():
@@ -91,7 +90,8 @@ def install_dependencies(repo_dir, stage='evaluation'):
     if cuda_stack() != before:
         raise RuntimeError('CUDA stack changed unexpectedly; stop and restart with the original image')
     subprocess.check_call([sys.executable, '-m', 'pip', 'check'])
-    snapshot = {'protected_cuda_stack': before, 'profile': profile.name,
+    snapshot = {'python': sys.version, 'protected_cuda_stack': before, 'profile': profile.name,
+                'effective_requirements': {name: str(req.specifier) for name, req in requirements(profile).items()},
                 'resolved_install': [{'name': entry['metadata']['name'], 'version': entry['metadata']['version']} for entry in plan.get('install', [])],
                 'installed_packages': {d.metadata['Name']: d.version for d in importlib.metadata.distributions() if d.metadata['Name']}}
     (snapshot_dir / 'dependency_snapshot.json').write_text(json.dumps(snapshot, indent=2))

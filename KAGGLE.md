@@ -18,7 +18,7 @@ Dùng kernel mới. Package `src.training` nay lazy-load API nên import `src.tr
 
 `requirements.txt`, `requirements-kaggle.txt` và entry point cũ trong docs cùng trỏ về profile chung; không cài TRL/Datasets/Unsloth/xFormers/Flash Attention khi code không sử dụng. XGrammar vẫn optional và phải chọn bản đã kiểm chứng riêng.
 
-Với `INSTALL_DEPS=1`, bootstrap yêu cầu Python 3.10–3.12 và image có CUDA torch >=2.5,<3 đang hoạt động. Nó constrain phiên bản torch/torchvision/torchaudio/triton preinstalled, chạy pip dry-run với binary wheels, từ chối kế hoạch thay CUDA stack hoặc thay package đã import, rồi mới install và `pip check`. Giữ `dependency_snapshot.json` với baseline, profile và version thực tế. Không cài lại CUDA/PyTorch để né resolver error. Các profile pin application API nhưng **chưa là transitive lock hoặc certified Kaggle image**; giữ cùng image và snapshot khi chuyển account.
+Với `INSTALL_DEPS=1`, bootstrap yêu cầu CPython 3.10–3.12 cho các profile chung; riêng Notebook 01 (`grounding`) cho phép CPython thường 3.13. Image phải có CUDA torch >=2.5,<3; với Python 3.13 cần torch >=2.6. Không hỗ trợ free-threaded Python. Nó constrain phiên bản torch/torchvision/torchaudio/triton preinstalled, chạy pip dry-run với binary wheels, từ chối kế hoạch thay CUDA stack hoặc thay package đã import, rồi mới install và `pip check`. Giữ `dependency_snapshot.json` với baseline, profile và version thực tế. Không cài lại CUDA/PyTorch để né resolver error. Các profile pin application API nhưng **chưa là transitive lock hoặc certified Kaggle image**; giữ cùng image và snapshot khi chuyển account.
 
 Nếu warm kernel có module khác bản trên disk hoặc cần thay package đã load: dừng, restart kernel rồi chạy lại từ cấu hình. Không restart hoặc `os._exit` giữa một job Save & Run All rồi mong job tự tiếp tục. Nếu package được image preload không tương thích, chọn image/profile phù hợp trước khi run. `INSTALL_DEPS=0` không tắt preflight: notebook vẫn kiểm tra version, import, write/disk và CUDA kernel; Generation/Evaluation kiểm tra NF4 primitive trước tải model. `PIPELINE_MODE=smoke` bỏ qua install/Hub/GPU và không được coi là kiểm chứng dependency native.
 
@@ -36,6 +36,35 @@ python scripts/run_smoke_tests.py
 ```
 
 Pretrained/full-size training và Hub thật vẫn cần acceptance hai phiên ở cuối hướng dẫn. Các test local chỉ dùng tiny random models và Hub giả lập. Không kết luận 7B fit trên T4/P100 từ import hoặc NF4 primitive test.
+
+### Notebook 01: Python mới trên Kaggle (2026-11-13)
+
+Runtime người dùng cung cấp: **CPython 3.13.16, Linux x86_64, glibc 2.39**. Gate bootstrap và preflight dùng chung chính sách Python. Chỉ mở rộng `grounding` sang CPython thường 3.13, không suy rộng sang PEFT/BNB/evaluation chưa xác minh. Giữ nguyên mọi dependency pin; wheel metadata hỗ trợ Python 3.13. Pydantic 2.11.3/core 2.33.1 có wheel cp313, tokenizers 0.21.4 dùng cp39-abi3. Python 3.14 vẫn bị từ chối: core 2.33.1 không có cp314 wheel. Không nâng pin không cần thiết cho runtime 3.13.
+
+Sources: [pydantic-core 2.33.1 wheels](https://pypi.org/project/pydantic-core/2.33.1/), [tokenizers 0.21.4](https://pypi.org/project/tokenizers/0.21.4/), [PyTorch release matrix](https://github.com/pytorch/pytorch/blob/main/RELEASE.md).
+
+Trước setup, ghi lại đúng runtime (không dump environment hoặc token):
+
+```python
+import sys, torch
+print(sys.version)
+print(torch.__version__, torch.version.cuda, torch.cuda.is_available())
+if torch.cuda.is_available():
+    print(torch.cuda.get_device_name(0), torch.cuda.get_arch_list())
+```
+
+Dùng clean kernel, `INSTALL_DEPS=1` và chạy lại setup Notebook 01. Không import ST/NumPy/Transformers trước bootstrap. Vẫn có constrained binary-only pip dry-run, bảo vệ CUDA stack, kiểm loaded packages, pip check, snapshot và preflight. Snapshot nay ghi cả Python và effective requirements đúng profile. Nếu thiếu wheel, resolver conflict, kernel warm hoặc torch image quá cũ: dừng, không dùng `--no-deps`, không cài lại torch/CUDA trong notebook để né lỗi.
+
+Sau setup, kiểm tra bằng subprocess mới:
+
+```python
+import subprocess
+subprocess.run([sys.executable, str(REPO_DIR/'scripts/check_kaggle_environment.py'),
+                '--stage', 'grounding', '--device', 'cuda:0',
+                '--output', '/kaggle/working/environment-check-01'], check=True, cwd=REPO_DIR)
+```
+
+`REPO_DIR` là thư mục source đã attach. CUDA build/driver, kiến trúc GPU và kernel forward/backward vẫn phải pass trên T4/P100 thật; Python/wheel tương thích không bảo đảm CUDA tương thích. Đặc biệt image torch mới có thể không chứa kernels cho P100. Không nâng Python trong phiên resume cũ: dùng lại môi trường và snapshot gốc.
 
 ## Workflow acceptance GPU/HF được chuẩn bị
 

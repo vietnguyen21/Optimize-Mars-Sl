@@ -56,9 +56,71 @@ class TestKaggleEnvironment(unittest.TestCase):
     def test_installer_rejects_unsupported_python_before_pip(self):
         with patch.dict(os.environ, PIPELINE_MODE='train', INSTALL_DEPS='1'), \
              patch('sys.version_info', (3, 14, 0)), patch('subprocess.check_call') as call:
-            with self.assertRaisesRegex(RuntimeError, 'Python 3.10'):
+            with self.assertRaisesRegex(RuntimeError, 'CPython 3.10'):
                 install_dependencies(ROOT)
             call.assert_not_called()
+
+    def test_grounding_python_and_torch_floors(self):
+        from src.training.environment import validate_python_runtime
+        for version, minimum in [((3,10,0),'2.5'), ((3,12,0),'2.5'),
+                                 ((3,13,16),'2.6')]:
+            with self.subTest(version=version), patch('sys.version_info', version), \
+                 patch('sysconfig.get_config_var', return_value=0):
+                self.assertEqual(validate_python_runtime('grounding'), minimum)
+        for version in [(3,9,0), (3,14,0)]:
+            with patch('sys.version_info', version), self.assertRaises(RuntimeError):
+                validate_python_runtime('grounding')
+        with patch('sys.version_info',(3,13,16)), patch('sysconfig.get_config_var',return_value=1):
+            with self.assertRaisesRegex(RuntimeError, 'Free-threaded'):
+                validate_python_runtime('grounding')
+
+    def test_grounding_python313_keeps_existing_pins(self):
+        with patch('sys.version_info',(3,13,16)):
+            reqs = requirements(profile_path(ROOT,'grounding'))
+            self.assertEqual(str(reqs['pydantic'].specifier),'==2.11.3')
+            self.assertEqual(str(reqs['sentence-transformers'].specifier),'==4.1.0')
+            self.assertEqual(str(reqs['transformers'].specifier),'==4.51.3')
+            self.assertNotIn('bitsandbytes',reqs)
+
+    def test_grounding_new_python_keeps_resolver_and_snapshot(self):
+        for version, torch_version in [((3,13,16),'2.6.0+cu124')]:
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as d, \
+                 patch.dict(os.environ, PIPELINE_MODE='train', INSTALL_DEPS='1', KAGGLE_OUTPUT_DIR=d), \
+                 patch('sys.version_info',version), patch('sysconfig.get_config_var',return_value=0), \
+                 patch('src.training.environment.cuda_stack',return_value={'torch':torch_version}), \
+                 patch('src.training.environment.requirements',return_value={}), \
+                 patch.dict(sys.modules,torch=SimpleNamespace(__version__=torch_version,version=SimpleNamespace(cuda='12.6'),cuda=SimpleNamespace(is_available=lambda:True))), \
+                 patch('subprocess.check_call',side_effect=self.bootstrap_context(d,[])) as calls:
+                install_dependencies(ROOT,'grounding')
+                self.assertEqual(calls.call_count,3)
+                dry_run = calls.call_args_list[0].args[0]
+                self.assertIn('--only-binary=:all:',dry_run)
+                self.assertIn('--dry-run',dry_run)
+                self.assertIn('-c',dry_run)
+                snapshot=json.loads((Path(d)/'dependency_snapshot.json').read_text())
+                self.assertEqual(snapshot['protected_cuda_stack']['torch'],torch_version)
+                self.assertIn('python',snapshot)
+                self.assertIn('effective_requirements',snapshot)
+
+    def test_grounding_rejects_old_image_torch_before_pip(self):
+        for version, torch_version in [((3,13,16),'2.5.1+cu121')]:
+            with patch.dict(os.environ, PIPELINE_MODE='train', INSTALL_DEPS='1'), \
+                 patch('sys.version_info',version), patch('sysconfig.get_config_var',return_value=0), \
+                 patch('src.training.environment.cuda_stack',return_value={'torch':torch_version}), \
+                 patch('subprocess.check_call') as calls:
+                with self.assertRaisesRegex(RuntimeError,'Select an image'):
+                    install_dependencies(ROOT,'grounding')
+                calls.assert_not_called()
+
+    def test_preflight_uses_same_new_python_torch_floor(self):
+        with patch('sys.version_info',(3,13,16)), patch('sysconfig.get_config_var',return_value=0), \
+             patch('src.training.environment.metadata.version',return_value='2.5.1'), \
+             patch.dict(sys.modules,torch=SimpleNamespace(__version__='2.5.1')):
+            with self.assertRaisesRegex(RuntimeError,'torch >=2.6'):
+                validate_environment(ROOT,'grounding','/not-created',device='cpu')
+        with patch('sys.version_info',(3,14,0)):
+            with self.assertRaisesRegex(RuntimeError,'CPython 3.10–3.12'):
+                validate_environment(ROOT,'evaluation','/not-created',device='cpu')
 
     def test_missing_input_fails_before_model_load(self):
         with tempfile.TemporaryDirectory() as d:
@@ -199,6 +261,7 @@ class TestKaggleEnvironment(unittest.TestCase):
     def test_environment_rejects_loaded_disk_version_mismatch(self):
         from packaging.requirements import Requirement
         with patch('sys.version_info',(3,11,0)), \
+             patch('sysconfig.get_config_var',return_value=0), \
              patch('src.training.environment.requirements',return_value={'pydantic':Requirement('pydantic==2.11.3')}), \
              patch('importlib.metadata.version',side_effect=lambda name:'2.5.1' if name=='torch' else '2.11.3'), \
              patch('importlib.import_module',return_value=SimpleNamespace(__version__='2.10.0')), \

@@ -1,5 +1,6 @@
 # Candidate application pins; CUDA PyTorch comes from the Kaggle image.
-# Supported bootstrap: Python 3.10–3.12, CUDA-enabled torch >=2.5,<3.
+# Python 3.10–3.12: all profiles; grounding also standard CPython 3.13.
+# Image CUDA torch >=2.5,<3; Python 3.13 requires >=2.6. Never replace it.
 # GPU/driver/kernel compatibility must pass environment preflight.
 transformers==4.51.3
 accelerate==1.6.0

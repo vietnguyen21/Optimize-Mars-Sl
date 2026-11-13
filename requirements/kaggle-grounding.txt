@@ -1,2 +1,3 @@
 -r kaggle-core.txt
 sentence-transformers==4.1.0
+# Notebook 01 also supports standard CPython 3.13; binary-only resolver required.

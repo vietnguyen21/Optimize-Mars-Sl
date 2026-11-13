@@ -41,7 +41,7 @@ Chọn **một** GPU target: `t4` hoặc `p100`; không đổi target giữa A/B
 
 Bootstrap được chạy trong process mới trước import ML:
 
-- Python 3.10–3.12 và CUDA torch >=2.5,<3 của image là điều kiện hiện có, không được tool tự thay thế.
+- CPython 3.10–3.12 cho profile chung; riêng `grounding` cho phép CPython thường 3.13 (torch tối thiểu 2.6). CUDA torch của image vẫn <3 và không được tool tự thay thế. Xem chi tiết wheels trong KAGGLE.md.
 - Chọn component profile từ `requirements/kaggle-*.txt`.
 - Pip dry-run + constraints bảo vệ torch/torchvision/torchaudio/triton; từ chối thay package đã load; install và `pip check`.
 - Giữ `dependency_snapshot.json`, `environment.json`, package versions và driver/GPU report.

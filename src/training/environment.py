@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sys
+import sysconfig
 import tempfile
 
 PROFILES = {'grounding': 'kaggle-grounding.txt', 'sft_jepa_3b': 'kaggle-generation.txt',
@@ -15,6 +16,21 @@ CORE = {'transformers': 'transformers', 'accelerate': 'accelerate',
         'huggingface-hub': 'huggingface_hub', 'tokenizers': 'tokenizers',
         'safetensors': 'safetensors', 'numpy': 'numpy', 'networkx': 'networkx',
         'sqlglot': 'sqlglot', 'pydantic': 'pydantic'}
+
+
+def validate_python_runtime(stage):
+    """Newer CPython is scoped to Notebook 01, not unvalidated GPU extras."""
+    version = sys.version_info[:2]
+    maximum = (3, 14) if stage == 'grounding' else (3, 13)
+    supported = '3.10–3.13' if stage == 'grounding' else '3.10–3.12'
+    if not (3, 10) <= version < maximum or sys.implementation.name != 'cpython':
+        actual = '.'.join(map(str, version))
+        raise RuntimeError(f'Profile {stage} requires CPython {supported}; detected {actual}. '
+                           'Python 3.13 support is currently scoped to Notebook 01 grounding')
+    if sysconfig.get_config_var('Py_GIL_DISABLED'):
+        raise RuntimeError('Free-threaded Python is not validated for these binary profiles; use standard CPython')
+    # Official wheel floors; never install/replace the image torch to meet them.
+    return '2.6' if version >= (3, 13) else '2.5'
 
 
 def profile_path(repo, stage):
@@ -82,13 +98,12 @@ def check_transfer_disk(output, cache, payload):
 def validate_environment(repo, stage, output_dir, device='cuda:0', *, smoke=False, quantization=False):
     if smoke:
         return {'smoke': True, 'environment_validation': 'offline wiring only'}
-    if not (3, 10) <= sys.version_info[:2] < (3, 13):
-        raise RuntimeError('Kaggle profiles require Python 3.10–3.12; validate a separate profile for other versions')
+    minimum_torch = validate_python_runtime(stage)
     import torch
     from packaging.version import Version
     validate_torch_build(torch)
-    if not Version('2.5') <= Version(torch.__version__.split('+')[0]) < Version('3'):
-        raise RuntimeError('Require preinstalled torch >=2.5,<3; select a compatible image before installing application packages')
+    if not Version(minimum_torch) <= Version(torch.__version__.split('+')[0]) < Version('3'):
+        raise RuntimeError(f'Require preinstalled torch >={minimum_torch},<3 for this Python; select a compatible image before installing application packages')
     for name, req in requirements(profile_path(repo, stage)).items():
         try:
             installed = metadata.version(name)

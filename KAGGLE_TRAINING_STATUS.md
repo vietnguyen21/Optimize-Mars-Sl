@@ -1,6 +1,16 @@
 # Kaggle training status — Optimize-Mars-Sl
 
-Status updated: 2026-11-11 (checkpoint synchronization); earlier training evidence recorded 2026-11-06. This report describes the current local implementation and the validation logs retained in this repository. It does not certify a successful Kaggle run.
+Status updated: 2026-11-13 (Notebook 01 Python compatibility); earlier training evidence recorded 2026-11-06. This report describes the current local implementation and the validation logs retained in this repository. It does not certify a successful Kaggle run.
+
+## Notebook 01 Python compatibility fix — 2026-11-13
+
+Runtime xác nhận bởi người dùng: **CPython 3.13.16, Linux x86_64, glibc 2.39**. Gate cũ chặn Python >3.12 trước pip. Mở rộng **chỉ grounding** cho standard CPython 3.13; installer/preflight dùng shared gate, yêu cầu image CUDA torch >=2.6,<3. Các profile còn lại giữ 3.10–3.12. Reject free-threaded Python, Python 3.14+ và image torch cũ; không tự thay CUDA stack.
+
+Giữ nguyên mọi dependency pin. Metadata PyPI xác nhận wheels Python 3.13 cho direct pins và binary dependency candidates, gồm pydantic-core 2.33.1 cp313 và tokenizers 0.21.4 cp39-abi3. Python 3.14 không được mở vì pin core 2.33.1 thiếu cp314 wheel. Không thay package cho runtime không được yêu cầu. Snapshot thêm Python/effective requirements; dry-run, binary-only resolution, CUDA constraints, loaded-module guard, pip check và preflight giữ nguyên. Requirements files chỉ cập nhật comments phạm vi support.
+
+Validation local: **261 native CPU tests passed**, 0 skipped/failures/errors (7.799s); system suite 261 tests, **232 passed/29 dependency skips** (1.421s); 6/6 smoke suites passed (0.943s). 22 environment tests passed (0.232s). CPU tests chạy Python local 3.14; acceptance 3.13 của installer/preflight dùng mocks. Metadata audit 19 package/version candidates có wheel compatible CPython 3.13 Linux x86_64: `/tmp/notebook01-wheels-cp313.json`, `/tmp/notebook01-wheels-cp313.log`. Đây là wheel availability, không phải installation hoặc full transitive lock. Logs tests: `/tmp/notebook01-native.log`, `/tmp/notebook01-system.log`, `/tmp/notebook01-smoke.log`, `/tmp/notebook01-environment.log`.
+
+**NOT EXECUTED:** resolver/bootstrap trên Kaggle Python 3.13 thực, T4/P100 CUDA kernels/driver, full-size embedding model. Phiên bản torch/CUDA thực của Kaggle chưa được cung cấp; phải chạy lại setup và preflight trên image đó. Không sửa objective, checkpoint sync hoặc resume; không install package/training/upload/commit/push.
 
 ## GPU/HF acceptance workflow được chuẩn bị — 2026-11-11
 
