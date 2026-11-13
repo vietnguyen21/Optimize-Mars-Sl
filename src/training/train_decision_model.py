@@ -487,12 +487,17 @@ def _train_decision(data_path, output_dir, export_dir=None, model_name_or_path='
     amp = str(device).startswith('cuda')
     if amp and not torch.cuda.is_available():
         raise RuntimeError('CUDA requested but unavailable')
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+    from src.training.model_identity import model_identity, read_identity, verify_identity
+    expected_identity = read_identity(resume_from_checkpoint) if resume_from_checkpoint else None
+    identity, hf_options = model_identity(model_name_or_path, expected=expected_identity)
+    verify_identity(expected_identity, identity)
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, **hf_options)
     for row in train+cal+test:
         validate_decision_budget(tokenizer,row['question'],row['sql'],max_length)
     # Eager attention works on T4 without FlashAttention 2 or BF16.
     model = AutoModelForSequenceClassification.from_pretrained(model_name_or_path,num_labels=1,
-            attn_implementation='eager', torch_dtype=torch.float32).to(device)
+            attn_implementation='eager', reference_compile=False, torch_dtype=torch.float32, **hf_options).to(device)
+    model._training_base_identity = identity
     model.gradient_checkpointing_enable()
     optimizer = configure_dual_lr_optimizer(model,lr_backbone,lr_head)
     scaler = torch.amp.GradScaler('cuda',enabled=amp)
@@ -520,6 +525,10 @@ def _train_decision(data_path, output_dir, export_dir=None, model_name_or_path='
         return {k:v.to(device) for k,v in tokenizer(decision_text(row['question'],row.get('schema',''),row['sql']),
                   truncation=True,max_length=max_length,return_tensors='pt').items()}
     model.train();optimizer.zero_grad(set_to_none=True)
+    consecutive_skips = 0
+    max_skips = int(os.environ.get('AMP_MAX_CONSECUTIVE_SKIPS', '8'))
+    if max_skips < 1:
+        raise ValueError('AMP_MAX_CONSECUTIVE_SKIPS must be positive')
     while step < max_steps:
         total=0.
         for micro in range(gradient_accumulation_steps):
@@ -529,16 +538,29 @@ def _train_decision(data_path, output_dir, export_dir=None, model_name_or_path='
                 logits=model(**encode(row)).logits.float().view(-1)
                 probs=logits.sigmoid()
                 loss=F.binary_cross_entropy_with_logits(logits,labels)+alpha_cal*((probs-labels)**2).mean()
+            if not torch.isfinite(loss):
+                raise FloatingPointError('Nonfinite objective; last complete checkpoint preserved')
             scaler.scale(loss/gradient_accumulation_steps).backward()
             total+=float(loss.detach())
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(),1.)
-        scaler.step(optimizer);scaler.update();optimizer.zero_grad(set_to_none=True)
+        from src.training.runtime import optimizer_update_succeeded
+        updated = optimizer_update_succeeded(optimizer, scaler)
+        optimizer.zero_grad(set_to_none=True)
+        if not updated:
+            consecutive_skips += 1
+            log.log(event='optimizer_skipped', step=step, reason='AMP overflow')
+            if consecutive_skips >= max_skips:
+                raise FloatingPointError('Repeated AMP overflow; last complete checkpoint preserved')
+            continue
+        consecutive_skips = 0
         step+=1
         log.log(step=step,loss=total/gradient_accumulation_steps)
         if step%save_steps==0 or step==max_steps:
             save_checkpoint(output_dir,model,optimizer,step,scaler=scaler,tokenizer=tokenizer,
                             extra={'phase':'system1','max_length':max_length,'contract':contract})
+    from src.training.checkpoint_sync import finalize_checkpoint_backup
+    finalize_checkpoint_backup()
     model.eval()
     def predict(rows):
         logits=[];labels=[]

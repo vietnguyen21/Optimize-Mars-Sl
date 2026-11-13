@@ -100,9 +100,11 @@ class NativeGroundingSystem1(unittest.TestCase):
         full=run_decision_model_training(output_dir=str(self.root/'full'),max_steps=2,**common)
         a=ModernBertForSequenceClassification.from_pretrained(resumed['model_path'])
         b=ModernBertForSequenceClassification.from_pretrained(full['model_path'])
+        self.assertFalse(a.config.reference_compile)
         for key,value in a.state_dict().items():
             self.assertTrue(torch.equal(value,b.state_dict()[key]),key)
         scorer=LayaScorer(model_path=resumed['model_path'],device='cpu',dry_run=False)
+        self.assertFalse(scorer.model.config.reference_compile)
         scores=scorer.score_candidates_parallel('Question 2','CREATE TABLE t(id INT);',['SELECT 0','SELECT 1'])
         self.assertEqual(len(scores),2)
         self.assertTrue(all(0<=score<=1 for score in scores))

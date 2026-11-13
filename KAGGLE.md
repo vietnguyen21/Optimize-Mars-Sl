@@ -4,6 +4,45 @@
 
 These pipelines replace the earlier dry-run scaffolds. Historical mini-data accuracy and calibration statements in PROJECT.md/HANDOVER.md are **not pretrained model benchmark evidence**. Smoke outputs now carry `mode: smoke`, `trained: false` (training runners), and `is_benchmark: false` (evaluation). Real mode never silently substitutes synthetic training or gold-based generation. No Kaggle execution, full-model convergence, T4 memory bound, or benchmark target has been verified locally. See the validation section below for actual checks.
 
+## Bootstrap sau environment audit
+
+Dùng kernel mới. Package `src.training` nay lazy-load API nên import `src.training.kaggle` không kéo Torch/Transformers vào trước bước cài đặt. Các notebook 01–05 chọn profile theo stage:
+
+| Stage | Profile |
+|---|---|
+| Grounding | `requirements/kaggle-grounding.txt` |
+| SFT/GRPO | `requirements/kaggle-generation.txt` |
+| System-1 | `requirements/kaggle-core.txt` |
+| Evaluation | `requirements/kaggle-evaluation.txt` |
+| Local validation tooling | `requirements/kaggle-dev.txt` |
+
+`requirements.txt`, `requirements-kaggle.txt` và entry point cũ trong docs cùng trỏ về profile chung; không cài TRL/Datasets/Unsloth/xFormers/Flash Attention khi code không sử dụng. XGrammar vẫn optional và phải chọn bản đã kiểm chứng riêng.
+
+Với `INSTALL_DEPS=1`, bootstrap yêu cầu Python 3.10–3.12 và image có CUDA torch >=2.5,<3 đang hoạt động. Nó constrain phiên bản torch/torchvision/torchaudio/triton preinstalled, chạy pip dry-run với binary wheels, từ chối kế hoạch thay CUDA stack hoặc thay package đã import, rồi mới install và `pip check`. Giữ `dependency_snapshot.json` với baseline, profile và version thực tế. Không cài lại CUDA/PyTorch để né resolver error. Các profile pin application API nhưng **chưa là transitive lock hoặc certified Kaggle image**; giữ cùng image và snapshot khi chuyển account.
+
+Nếu warm kernel có module khác bản trên disk hoặc cần thay package đã load: dừng, restart kernel rồi chạy lại từ cấu hình. Không restart hoặc `os._exit` giữa một job Save & Run All rồi mong job tự tiếp tục. Nếu package được image preload không tương thích, chọn image/profile phù hợp trước khi run. `INSTALL_DEPS=0` không tắt preflight: notebook vẫn kiểm tra version, import, write/disk và CUDA kernel; Generation/Evaluation kiểm tra NF4 primitive trước tải model. `PIPELINE_MODE=smoke` bỏ qua install/Hub/GPU và không được coi là kiểm chứng dependency native.
+
+Các guard bổ sung: ModernBERT luôn `reference_compile=False` trong training/scoring để không tự dùng Triton trên P100. Grounding/System-1 chỉ tăng step khi optimizer update thực; `AMP_MAX_CONSECUTIVE_SKIPS` mặc định 8, quá ngưỡng sẽ dừng và giữ checkpoint trước đó. CUDA checkpoint mới ghi active device; khi đổi GPU topology, chỉ map RNG training GPU sang thiết bị được chọn và cảnh báo không bảo đảm bitwise reproducibility giữa hardware khác nhau.
+
+Kiểm tra nhẹ, không download model hoặc ghi Hub:
+
+```bash
+python scripts/check_kaggle_environment.py --smoke
+# Chỉ chạy trên GPU Kaggle đã bootstrap profile tương ứng:
+python scripts/check_kaggle_environment.py --stage grounding --device cuda:0
+python scripts/check_kaggle_environment.py --stage sft_jepa_3b --device cuda:0 --quantization
+python -m unittest discover -s tests -v
+python scripts/run_smoke_tests.py
+```
+
+Pretrained/full-size training và Hub thật vẫn cần acceptance hai phiên ở cuối hướng dẫn. Các test local chỉ dùng tiny random models và Hub giả lập. Không kết luận 7B fit trên T4/P100 từ import hoặc NF4 primitive test.
+
+## Workflow acceptance GPU/HF được chuẩn bị
+
+Dùng [KAGGLE_GPU_ACCEPTANCE.md](KAGGLE_GPU_ACCEPTANCE.md) cho script và lệnh T4/P100, optional private Hub round-trip, hai session A/B, expected state/cursor/hash và pass/fail gates. Tool `scripts/run_kaggle_acceptance.py` mặc định không install hoặc upload; `--hub-upload` mới cho ghi fixture <5 MiB trong `acceptance-<UUID>` riêng. Không dùng checkpoint fixture cho research training.
+
+**Kaggle GPU/NF4/Hub thật: NOT EXECUTED trong workspace chuẩn bị tool.** CPU fixture và Hub mocks chỉ là local validation. Chưa xác minh bootstrap trên fresh image Kaggle thực; installer hiện có được tái sử dụng, không thay PyTorch/CUDA stack. TRL optional cho custom loops; `--require-trl` cho gate riêng. Tiny architecture probes không tải pretrained model và không xác minh full-size memory/quality. Chi tiết các flag xem `python scripts/run_kaggle_acceptance.py --help`.
+
 ## Attachments and environment
 
 Attach a snapshot of this existing repository to each notebook as a Kaggle Dataset; no clone, branch, push or GitHub access is needed. Set `KAGGLE_REPO_DIR` to the attached directory containing `src/` (for example `/kaggle/input/optimize-mars-repo/Optimize-Mars-Sl`). Run each notebook independently. No previous notebook's Python process state is required.
@@ -17,8 +56,9 @@ os.environ.update({
     'KAGGLE_DATA_DIR': '/kaggle/input/text2sql-data',
     'KAGGLE_OUTPUT_DIR': '/kaggle/working/optimize-mars-experiment-01',
     'PIPELINE_MODE': 'train',  # smoke is the explicit CPU wiring mode
-    'INSTALL_DEPS': '1',      # opt in to requirements-kaggle.txt installation
+    'INSTALL_DEPS': '1',      # cold-kernel component bootstrap, with CUDA constraints
     'TRAIN_DEVICE': 'cuda:0',
+    'HF_HOME': '/kaggle/working/hf-cache',
     'SEED': '42',
     'MAX_LENGTH': '512',
     'MAX_STEPS': '100',
@@ -27,9 +67,9 @@ os.environ.update({
 })
 ```
 
-Use Internet-enabled Kaggle for first-time package/model downloads, or attach approved wheel/model datasets for offline use. `requirements-kaggle.txt` is a candidate Python 3.10/3.11 dependency lock, not a validated Kaggle image. Keep Kaggle's CUDA-enabled torch >=2.5. Optional XGrammar must be installed separately and its native/tokenizer compatibility verified. All installed package versions, Python, GPU name and GPU memory are recorded in `environment.json`.
+Use Internet-enabled Kaggle for first-time package/model downloads, or attach approved wheel/model datasets for offline use. `requirements-kaggle.txt` is a candidate Python 3.10–3.12 application profile, not a validated Kaggle image. Keep Kaggle's CUDA-enabled torch >=2.5. Optional XGrammar must be installed separately and its native/tokenizer compatibility verified. All installed package versions, Python, GPU name and GPU memory are recorded in `environment.json`.
 
-`meta-llama/Llama-3.2-3B-Instruct` requires accepted model access terms and authenticated HF access. Obtain a token through Kaggle Secrets and authenticate using `huggingface_hub.login(token=...)` without printing it, or set `GENERATOR_MODEL` to an attached authorized local base model. Base weights remain required to load a PEFT adapter. Set `BASE_MODEL_PATH` to the corresponding attached base-model directory if the path stored in a shared adapter is unavailable in the receiving account/session. The override must refer to the same model and vocabulary used in SFT. The project does not export gated base weights.
+`meta-llama/Llama-3.2-3B-Instruct` requires accepted model access terms and authenticated HF access. Obtain a token through Kaggle Secrets and grant the configured Kaggle Secret to the notebook; loaders pass the token directly without persisting login credentials, or set `GENERATOR_MODEL` to an attached authorized local base model. Base weights remain required to load a PEFT adapter. Set `BASE_MODEL_PATH` to the corresponding attached base-model directory if the path stored in a shared adapter is unavailable in the receiving account/session. The override must refer to the same model and vocabulary used in SFT. The project does not export gated base weights.
 
 One 16 GB T4 is the initial target: FP16 compute, NF4 double quantization for Generation, rank-16 LoRA, gradient checkpointing, one microbatch, sequential sampling. Two T4s have separate memory; the implementation does not pretend they provide pooled 32 GB VRAM. Use separate `TRAIN_DEVICE` values/processes for independent experiments if desired. No DDP is required. Start with 3B. A 7B configuration is optional and requires measured memory validation. Reduce sequence and rollout lengths on OOM. Some short-sequence datasets require a larger `MAX_LENGTH` for complete reasoning+SQL examples; SFT logs any excluded overlength examples. Inspect this count rather than assuming the full dataset was used.
 
@@ -49,13 +89,13 @@ Follow the setup, member instructions, handoff and acceptance steps below in ord
 ### Common preparation for each account
 
 1. Upload/open the assigned existing `.ipynb` in Kaggle. Attach the same versioned repository snapshot and licensed research data. Select a GPU runtime for real training; start on `cuda:0` of one T4. Set the common cell above and your member cell below. Use a unique output root for every run.
-2. Enable Internet for initial package/model downloads, or attach compatible wheels and authorized complete local model/tokenizer directories. The notebook's automatic installer uses pip and does not configure an offline wheel directory for you. Install offline wheels explicitly before setup if needed, then use `INSTALL_DEPS=0`. Keep CUDA torch >=2.5. The pinned direct dependencies in [requirements-kaggle.txt](requirements-kaggle.txt) are a candidate Python 3.10/3.11 lock, not a certified Kaggle environment. Restart the kernel after changing imported packages and rerun configuration.
+2. Enable Internet for initial package/model downloads, or attach compatible wheels and authorized complete local model/tokenizer directories. The notebook's automatic installer uses pip and does not configure an offline wheel directory for you. Install offline wheels explicitly before setup if needed, then use `INSTALL_DEPS=0`. Keep CUDA torch >=2.5. The pinned direct dependencies in [requirements-kaggle.txt](requirements-kaggle.txt) are a candidate Python 3.10–3.12 lock, not a certified Kaggle environment. Restart the kernel after changing imported packages and rerun configuration.
 3. For Member 2 and the evaluation operator, authorize the gated Llama base first. With a Kaggle Secret named `HF_TOKEN`, run the following before model loading when downloading from HF:
 
 ```python
-from kaggle_secrets import UserSecretsClient
-from huggingface_hub import login
-login(token=UserSecretsClient().get_secret("HF_TOKEN"), add_to_git_credential=False)
+import os
+os.environ['MODEL_HF_TOKEN_SECRET'] = 'HF_TOKEN'  # tên Secret, không phải giá trị token
+# Model loaders tự đọc Secret và truyền token trực tiếp; không cần login()
 ```
 
 4. Execute the notebook in order. Confirm printed mode, data, output, GPU and resume path before the training cell. Retain `environment.json`, configuration cells, data versions and actual model identity with the artifact.
@@ -331,9 +371,9 @@ Cơ chế này đã có kiểm thử local với Hub giả lập và tiny model 
 1. Mỗi thành viên tạo một **Model repository, Private** trên Hugging Face, ví dụ `ten-m1/mars-checkpoints`, `ten-m2/mars-checkpoints`, `ten-m3/mars-checkpoints`. Không dùng repository GitHub chứa mã nguồn. Backend không tự tạo repo; tạo repo có README/commit đầu tiên trước khi chạy.
 2. Tại HF Settings → Access Tokens, tạo token có quyền **write** vào đúng repo. Nếu dùng fine-grained token, cấp cả quyền đọc nội dung và quyền ghi repo đích. Không dùng token của người khác để ghi cùng thí nghiệm.
 3. Trong Kaggle → Add-ons → Secrets, thêm `HF_TOKEN`, dán token vào giá trị Secret và bật quyền truy cập cho notebook. Không dán token vào cell, JSON cấu hình hoặc dataset. Ngoài Kaggle, có thể cung cấp biến môi trường `HF_TOKEN` qua secret manager; biến môi trường theo tên `CHECKPOINT_HF_TOKEN_SECRET` được ưu tiên, rồi mới đọc Kaggle Secrets.
-4. Bật Internet cho notebook. Preflight xác minh `private is True`, xác định tài khoản HF và giữ namespace cho tài khoản đó **trước khi tải model/training**. Repo public, không xác minh được privacy hoặc namespace thuộc tài khoản khác đều dừng an toàn, kể cả policy `warn`.
+4. Bật Internet cho notebook. Preflight xác minh `private is True`, xác định tài khoản HF và giữ namespace cho tài khoản đó **trước khi tải model/training**. Repo public hoặc namespace thuộc tài khoản khác đều bị từ chối. Khi service không truy cập được và policy `warn`, backend không upload; `auto` chỉ tiếp tục nếu có checkpoint local hợp lệ, không tự chạy fresh khi không biết trạng thái remote.
 
-Tham khảo chính thức: [HF tạo repo private và quyền token](https://huggingface.co/docs/huggingface_hub/quick-start), [commit nguyên tử và `parent_commit`](https://huggingface.co/docs/huggingface_hub/package_reference/hf_api#huggingface_hub.HfApi.create_commit). Không cần git clone/login vào GitHub hoặc lưu token trong git credentials. Token checkpoint chỉ truyền trực tiếp vào HF API, không tự đăng nhập cho tải base model gated; Member 2 vẫn cần cấp quyền base model và xác thực riêng theo hướng dẫn ở trên.
+Tham khảo chính thức: [HF tạo repo private và quyền token](https://huggingface.co/docs/huggingface_hub/quick-start), [commit nguyên tử và `parent_commit`](https://huggingface.co/docs/huggingface_hub/package_reference/hf_api#huggingface_hub.HfApi.create_commit). Không cần git clone/login vào GitHub hoặc lưu token trong git credentials. Token checkpoint chỉ truyền trực tiếp vào HF API. Model loaders dùng `MODEL_HF_TOKEN_SECRET` nếu đặt, nếu không dùng tên Secret checkpoint (mặc định `HF_TOKEN`). Có thể dùng hai Secret khác nhau cho quyền write backup và quyền read model gated. Member 2 vẫn phải chấp nhận quyền truy cập model; token không được ghi vào config, checkpoint hoặc git credentials.
 
 ### 2. Cấu hình chung trước cell setup
 
@@ -366,12 +406,12 @@ Remote path là `checkpoints/<experiment-id>/<stage>/checkpoint-N/`. `owner.json
 
 ### 3. Lưu và backup khi training
 
-- `SAVE_STEPS` là số optimizer update giữa hai lần lưu **local**. `CHECKPOINT_SYNC_EVERY_N_SAVES` là số lần lưu local giữa hai lần upload; hai tần suất độc lập. Ví dụ 25 và 2: lưu local mỗi 25 update, upload mỗi 50 update; checkpoint cuối vẫn được thử upload khi runner thành công.
+- `SAVE_STEPS` là số optimizer update giữa hai lần lưu **local**. `CHECKPOINT_SYNC_EVERY_N_SAVES` là số lần lưu local giữa hai lần upload; hai tần suất độc lập. Ví dụ 25 và 2: lưu local mỗi 25 update, upload mỗi 50 update; checkpoint training cuối được thử upload trước retrieval/calibration/export, rồi runner kiểm tra lại khi hoàn tất.
 - Model/adapter, tokenizer khi có, optimizer, scheduler khi dùng, AMP scaler, RNG Python/NumPy/Torch/CUDA, JEPA predictor, step/cursor và resume contract giữ định dạng `training_state.pt` hiện có. Grounding/System-1 suy ra cursor từ step và accumulation; SFT/GRPO lưu epoch/batch cursor. Các runner hiện tại không tạo LR scheduler; runtime vẫn hỗ trợ lưu/khôi phục scheduler nếu được truyền vào.
 - Local staging chứa manifest SHA-256/kích thước từng file, `COMPLETE` được ghi sau cùng, rồi rename công bố checkpoint. Chỉ checkpoint có `COMPLETE` và `training_state.pt` mới đủ điều kiện upload. `checkpoint_manifest.json` ghi step, stage, experiment, compatibility fingerprint, dataset/configuration fingerprint, inventory và `status=complete`.
-- Upload đồng bộ bằng một Hub commit nguyên tử chứa toàn bộ checkpoint và manifest. Blob upload dang dở không có manifest trong cây repo nên không được khám phá. Backend đọc lại file theo commit SHA và kiểm tra checksum trước khi báo `success=true`. Retry sau mất phản hồi commit nhận diện checkpoint đã có, không ghi đè hoặc upload lại payload đã hoàn tất.
+- Upload đồng bộ theo **hai pha**: commit vào `_uploads/<manifest-hash>/` với `INTENT.json`; đọc lại từng file ở revision đó để xác minh; sau đó mới commit thư mục `checkpoint-N` và completion manifest. Discovery bỏ qua `_uploads`, nên lỗi read-back trước publish không tạo checkpoint hoàn tất. Các blob lớn dùng chung nội dung được Hub deduplicate. Retry sau mất phản hồi nhận diện staging/publication đã tồn tại và không ghi đè checkpoint hoàn tất. Staging được giữ để điều tra, không tự xóa.
 - Log hiển thị thành công/thất bại, step, payload bytes, thời gian và `skipped`. `checkpoint_sync.jsonl` ở stage output giữ log; bytes là kích thước payload logic của commit, không phải số byte HTTP thực tế sau dedup/retry. Việc đọc lại để xác minh có thể cần tải thêm dữ liệu vào HF cache.
-- `warn`: checkpoint local được giữ, in cảnh báo **REMOTE BACKUP UNSUCCESSFUL** và tiếp tục. Training thành công không đồng nghĩa backup thành công; kiểm tra log cuối. `stop`: ném lỗi sau khi đã giữ checkpoint local, không tiếp tục training. Resume thất bại không được tự đổi thành chạy mới từ step 0.
+- `warn`: checkpoint local được giữ, in cảnh báo **REMOTE BACKUP UNSUCCESSFUL** và tiếp tục. Khi resume `auto`, remote lỗi/không tương thích không chặn local đã xác minh; khi không có bản hợp lệ, hệ thống báo lỗi thay vì tự khởi động từ step 0. Training thành công không đồng nghĩa backup thành công; kiểm tra log cuối. `stop`: ném lỗi sau khi đã giữ checkpoint local, không tiếp tục training. Resume thất bại không được tự đổi thành chạy mới từ step 0.
 - Không xóa checkpoint local/remote, không upload dataset hoặc toàn bộ output root. Chỉ upload thư mục checkpoint đã hoàn tất. `final/` của 01/04, index, schema graphs, calibration metadata, dữ liệu split và các báo cáo vẫn cần giữ/bàn giao riêng qua Kaggle outputs hoặc Dataset; chúng không nằm trong backup optimizer checkpoint.
 
 ### 4. Bắt đầu mới và resume trong phiên khác
@@ -398,9 +438,9 @@ os.environ.update({
 os.environ.pop('RESUME_FROM_CHECKPOINT', None)
 ```
 
-Preflight in latest completed local/remote steps; runner in `resume_checkpoint` và `verified_completed_step`. Thấy step N đã lưu, update tiếp theo phải là N+1; không chấp nhận mất optimizer/cursor hoặc tự về 0. Nếu dataset/config mismatch: dùng lại đúng cấu hình hoặc tạo ID mới, không bỏ kiểm tra. Giữ nguyên đường dẫn model identity trong runner; `BASE_MODEL_PATH` cho phép chuyển vị trí **cùng base model** khi PEFT loader tải adapter. Nếu dùng base local không còn đường dẫn gốc, attach lại đúng model và cấu hình override này. Không đổi base dưới adapter đã train.
+Preflight in latest completed local/remote steps; runner in `resume_checkpoint` và `verified_completed_step`. Thấy step N đã lưu, update tiếp theo phải là N+1; không chấp nhận mất optimizer/cursor hoặc tự về 0. Nếu dataset/config mismatch: dùng lại đúng cấu hình hoặc tạo ID mới, không bỏ kiểm tra. Checkpoint mới có `base_identity.json`: model Hub được pin commit SHA, local base được hash weights/config/tokenizer. `BASE_MODEL_PATH` cho phép chuyển vị trí **cùng base model** khi PEFT loader tải adapter và được kiểm tra identity. Hub→local override yêu cầu đúng các file nguồn theo hash metadata; không chấp nhận model chỉ có cùng tensor shape. Nếu dùng base local không còn đường dẫn gốc, attach lại đúng model và cấu hình override này. Không đổi base dưới adapter đã train.
 
-SFT/GRPO có giới hạn epoch ngoài `MAX_STEPS`: tăng step cap không kéo dài training đã hết epoch. Muốn kéo dài epoch cần chỉnh lời gọi runner rõ ràng. Grounding/System-1 bảo vệ `final/` đã có, nên dùng output mới khi tiếp tục sau một run hoàn tất. Checkpoint legacy chỉ có marker/state vẫn đọc được qua contract cũ; chưa có manifest/hash ban đầu để xác minh dữ liệu trước đó, nên chỉ dùng artifact đáng tin. Lưu thêm một update sẽ tạo checkpoint chuẩn mới để backup.
+SFT/GRPO có giới hạn epoch ngoài `MAX_STEPS`: tăng step cap không kéo dài training đã hết epoch. Muốn kéo dài epoch cần chỉnh lời gọi runner rõ ràng. Grounding/System-1 bảo vệ `final/` đã có, nên dùng output mới khi tiếp tục sau một run hoàn tất. Checkpoint legacy chỉ có marker/state vẫn đọc được qua contract cũ; chưa có manifest/hash ban đầu để xác minh dữ liệu trước đó, nên chỉ dùng artifact đáng tin. Lưu thêm một update sẽ tạo checkpoint chuẩn mới để backup. Legacy adapter không có identity và cần `BASE_MODEL_PATH` phải được operator xác minh trước, rồi opt-in `ALLOW_LEGACY_BASE_OVERRIDE=1`; hệ thống không thể suy ra identity lịch sử. Legacy CUDA checkpoint thiếu active device chỉ được tự restore trên cùng số GPU; không đoán mapping khi topology khác.
 
 ### 5. Chia sẻ khác tài khoản và Notebook 05 chỉ đọc
 
@@ -431,7 +471,7 @@ Notebook 05 không gọi preflight có quyền ghi hoặc sync training. Khi c�
 | Insufficient disk space / ENOSPC | Giảm tần suất lưu phù hợp, tăng dung lượng trước run hoặc chuyển run sang output còn trống; không xóa bản hợp lệ duy nhất |
 | Checkpoint step đã tồn tại | Resume đúng step hoặc output/experiment mới; hệ thống không ghi đè checkpoint đã hoàn tất |
 
-Model full + AdamW có thể lớn hơn adapter rất nhiều. Tính cả checkpoint local, staging và HF cache; tải cần tối thiểu khoảng 2× payload trống và một phần dự phòng, có thể cần thêm nếu cache ở ổ khác. Log sync có thể không ghi được khi ổ đầy; lỗi OS được giữ nguyên để chẩn đoán. Artifact optimizer là pickle: chỉ load từ nhóm/repo đáng tin; checksum xác minh tính toàn vẹn, không chứng minh nguồn đáng tin hay giấy phép phân phối. Dữ liệu/ngữ cảnh nghiên cứu có thể nằm trong model, nên repo luôn private và quyền truy cập tối thiểu. Không bật HTTP debug logging chứa credential bên ngoài ứng dụng.
+Model full + AdamW có thể lớn hơn adapter rất nhiều. Tính cả checkpoint local, staging và HF cache; save ước tính tensor payload với headroom; download kiểm tra cả output và HF cache (2× payload nếu cùng filesystem); upload kiểm tra chỗ cho read-back cache. `CHECKPOINT_DISK_RESERVE_BYTES` mặc định 256 MiB. Đây là lower-bound guard, không phải dự báo quota/serialization chính xác cho toàn run. Full-model FP32 + AdamW checkpoint xấp xỉ 12 byte/parameter, vì vậy cần dự toán số checkpoint giữ lại và cache trước run. Log sync có thể không ghi được khi ổ đầy; lỗi OS được giữ nguyên để chẩn đoán. Artifact optimizer là pickle: chỉ load từ nhóm/repo đáng tin; checksum xác minh tính toàn vẹn, không chứng minh nguồn đáng tin hay giấy phép phân phối. Dữ liệu/ngữ cảnh nghiên cứu có thể nằm trong model, nên repo luôn private và quyền truy cập tối thiểu. Không bật HTTP debug logging chứa credential bên ngoài ứng dụng.
 
 ### 7. Checklist hai phiên Kaggle thật
 

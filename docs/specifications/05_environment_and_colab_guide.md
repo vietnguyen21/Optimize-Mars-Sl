@@ -1,3 +1,5 @@
+> **Hướng dẫn environment cũ đã deprecated.** Kaggle dùng [KAGGLE.md](../../KAGGLE.md), private HF backend và component profiles. Không áp dụng Drive paths, GPU fit hoặc setup assumptions lịch sử dưới đây cho Kaggle.
+
 # HƯỚNG DẪN MÔI TRƯỜNG & HUẤN LUYỆN TRÊN GOOGLE COLAB (ENVIRONMENT & COLAB GUIDE)
 
 ## 1. Yêu Cầu Phần Cứng & Môi Trường Google Colab
@@ -99,10 +101,9 @@ Nếu phiên Colab bị ngắt giữa chừng do mất kết nối mạng hoặc
 3. Script huấn luyện tự động phát hiện checkpoint gần nhất được lưu trong Drive thông qua cờ `--resume_from_checkpoint`:
    ```bash
    python src/training/train_sft_generator.py \
-       --model_type 3b \
+       --model_name_or_path meta-llama/Llama-3.2-3B-Instruct \
        --data_path /content/drive/MyDrive/Text2SQL_Colab/data/DATA-G2-SFT.jsonl \
        --output_dir /content/checkpoints/finer_sql_3b \
-       --drive_sync_dir /content/drive/MyDrive/Text2SQL_Colab/checkpoints/finer_sql_3b \
        --resume_from_checkpoint latest
    ```
-4. Quá trình huấn luyện sẽ tiếp tục ngay từ bước lặp (step) trước đó mà không phải train lại từ đầu.
+4. `latest` chỉ tìm local stage output; không tự đọc Drive. Resume HF dùng `CHECKPOINT_RESUME_SOURCE=remote` và cấu hình trong KAGGLE.md; không dùng các flag CLI legacy đã loại bỏ.

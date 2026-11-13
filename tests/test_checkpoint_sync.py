@@ -118,9 +118,9 @@ class TestCheckpointSync(unittest.TestCase):
         self.hub.lost_response = True
         # Claim already exists; next commit is the checkpoint commit.
         self.checkpoint()
-        self.assertEqual(self.hub.commits, 2)  # one owner claim + one checkpoint
+        self.assertEqual(self.hub.commits, 3)  # owner claim + staged payload + completion publication
         self.assertTrue(self.manager.sync(self.manager.last))
-        self.assertEqual(self.hub.commits, 2)
+        self.assertEqual(self.hub.commits, 3)
 
     def test_download_interruption_bounded_retry(self):
         self.checkpoint()
@@ -131,7 +131,7 @@ class TestCheckpointSync(unittest.TestCase):
 
     def test_corruption_rejected_before_publish_locally(self):
         self.checkpoint()
-        key = next(n for n in self.hub.history[self.hub.head] if n.endswith('training_state.pt'))
+        key = next(n for n in self.hub.history[self.hub.head] if '/checkpoint-' in n and n.endswith('training_state.pt'))
         self.hub.history[self.hub.head][key] = b'corrupt'
         with self.assertRaises(FileNotFoundError): self.new_manager('new').resolve('remote')
         self.assertFalse((self.root/'new/checkpoint-1').exists())
@@ -176,7 +176,7 @@ class TestCheckpointSync(unittest.TestCase):
         with self.assertRaises(ValueError): self.manager.completed(p, 1, {})
         self.manager.prepare_manifest(p, 1, {})
         with self.assertRaises(SyncError): self.manager.sync(p)
-        self.assertEqual(self.hub.commits, 2)
+        self.assertEqual(self.hub.commits, 3)
 
     def test_warn_policy_preserves_local_and_no_secret_logging(self):
         self.manager.policy = 'warn'
@@ -207,6 +207,17 @@ class TestCheckpointSync(unittest.TestCase):
         self.assertEqual(self.manager.remote_candidates(), [])
         self.manager.sync(self.manager.last)
         self.assertEqual(self.manager.remote_candidates()[0][0], 1)
+        from src.training.checkpoint_sync import ACTIVE_SYNC, finalize_checkpoint_backup
+        with patch.dict(os.environ, CHECKPOINT_EXPERIMENT_ID='handoff-with-no-new-updates'):
+            receiver = self.new_manager('handoff')
+        receiver.last = self.manager.last
+        context = ACTIVE_SYNC.set(receiver)
+        try:
+            with patch.object(receiver, 'sync') as upload:
+                finalize_checkpoint_backup()
+                upload.assert_not_called()
+        finally:
+            ACTIVE_SYNC.reset(context)
 
 
     def test_cross_account_read_only_download_without_claim(self):
@@ -217,7 +228,7 @@ class TestCheckpointSync(unittest.TestCase):
         restored = backend.resolve('remote')
         self.assertTrue(Path(restored, 'COMPLETE').exists())
         with self.assertRaises(SyncError): backend.sync(restored)
-        self.assertEqual(self.hub.commits, 2)
+        self.assertEqual(self.hub.commits, 3)
 
     def test_real_optimizer_rng_scheduler_scaler_and_jepa_remote_restore(self):
         try:
@@ -343,6 +354,69 @@ class TestCheckpointSync(unittest.TestCase):
         self.assertTrue(self.manager.remote_candidates())
         self.assertEqual(self.hub.history[self.hub.head]['unrelated'], b'concurrent stage')
         self.assertEqual(self.sleeps, [1])
+
+
+
+    def test_local_null_manifest_is_not_legacy(self):
+        p = self.checkpoint()
+        for malformed in ('null', 'false', '[]', '{}'):
+            (p / MANIFEST).write_text(malformed)
+            with self.assertRaises(ValueError): verify(p)
+            with self.assertRaises(ValueError): self.manager.resolve(str(p))
+
+    def test_staging_verification_failure_never_publishes_completion(self):
+        p = self.checkpoint(sync=False)
+        self.manager.prepare_manifest(p, 1, {})
+        with patch.object(self.manager, '_verify_remote', side_effect=ConnectionError('read interrupted')):
+            with self.assertRaises(SyncError): self.manager.sync(p)
+        self.assertEqual(self.manager.remote_candidates(), [])
+        self.assertFalse(any('/checkpoint-' in n for n in self.hub.history[self.hub.head]))
+        self.assertTrue(self.manager.sync(p))
+        self.assertEqual(self.manager.remote_candidates()[0][0], 1)
+        self.assertEqual(self.hub.commits, 3)
+
+    def test_lost_publication_response_is_idempotent(self):
+        original = self.hub.create_commit
+        def commit(*args, **kwargs):
+            if kwargs.get('commit_message', '').startswith('Publish'):
+                self.hub.lost_response = True
+            return original(*args, **kwargs)
+        with patch.object(self.hub, 'create_commit', side_effect=commit):
+            self.checkpoint()
+        self.assertEqual(self.hub.commits, 3)
+        self.assertEqual(self.manager.remote_candidates()[0][0], 1)
+
+    def test_auto_falls_back_to_verified_local_with_warn(self):
+        p = self.checkpoint()
+        self.manager.policy = 'warn'
+        with patch.object(self.manager, 'remote_candidates', side_effect=SyncError('offline')):
+            with self.assertWarns(RuntimeWarning):
+                self.assertEqual(self.manager.resolve('auto'), str(p))
+        with patch.object(self.manager, 'remote_candidates', return_value=[(99,'unused','sha',{'compatibility':'other'})]):
+            self.assertEqual(self.manager.resolve('auto'), str(p))
+        self.manager.policy = 'stop'
+        with patch.object(self.manager, 'remote_candidates', side_effect=SyncError('offline')):
+            with self.assertRaises(SyncError): self.manager.resolve('auto')
+
+    def test_auto_disabled_remote_can_resume_local_but_offline_empty_never_restarts(self):
+        p = self.checkpoint()
+        self.manager.enabled = False
+        self.assertEqual(self.manager.resolve('auto'), str(p))
+        new = self.new_manager('empty')
+        new.policy = 'warn'
+        with patch.object(new, 'remote_candidates', side_effect=SyncError('offline')):
+            with self.assertRaises(SyncError): new.resolve('auto')
+
+    def test_effective_generation_defaults_and_aliases_are_canonical(self):
+        from src.training.checkpoint_sync import persistent_training, ACTIVE_SYNC
+        @persistent_training('sft_jepa_3b')
+        def options(output_dir, **kwargs):
+            return ACTIVE_SYNC.get().compatibility
+        with patch.dict(os.environ, CHECKPOINT_SYNC_ENABLED='0',CHECKPOINT_RESUME_SOURCE='none'):
+            self.assertEqual(options(self.root), options(self.root,max_length=1024))
+            self.assertEqual(options(self.root), options(self.root,max_length='1024',lambda_jepa=1))
+            self.assertEqual(options(self.root), options(self.root,max_seq_length=1024))
+            self.assertNotEqual(options(self.root),options(self.root,max_length=512))
 
 
 if __name__ == '__main__':

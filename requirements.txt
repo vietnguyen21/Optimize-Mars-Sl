@@ -1,27 +1,3 @@
-# Deep Learning & Core LLM
-torch>=2.5.0
-transformers>=4.51.3,<5
-datasets>=2.20.0
-accelerate>=0.33.0
-peft>=0.15.2
-trl>=0.9.6
-bitsandbytes>=0.43.0
-
-# Constrained Decoding & Grammar
-xgrammar>=0.1.5
-
-# Graph & Mathematics
-networkx>=3.2.1
-scipy>=1.12.0
-numpy>=1.26.0
-
-# SQL Parsing & AST Rules
-sqlglot>=25.0.0
-
-# Embeddings & Retrieval
-sentence-transformers>=4.1.0
-
-# Utilities & Data
-pydantic>=2.7.0
-tqdm>=4.66.0
-gdown>=5.1.0
+# One application dependency source for local and Kaggle environments.
+# Install CUDA/CPU torch >=2.5,<3 separately for your hardware before this file.
+-r requirements-kaggle.txt

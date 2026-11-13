@@ -94,4 +94,40 @@ class TestRuntime(unittest.TestCase):
             with self.assertRaises(ValueError): load_checkpoint(Path(d)/'checkpoint-9',model,opt)
 
 
+    @unittest.skipUnless(real_torch_available(), 'PyTorch is not installed')
+    def test_cuda_rng_mapping_across_topology_without_cuda_context(self):
+        import torch
+        from src.training.runtime import restore_cuda_rng
+        states = [torch.tensor([1], dtype=torch.uint8),torch.tensor([2],dtype=torch.uint8)]
+        with patch.object(torch.cuda,'is_available',return_value=True), \
+             patch.object(torch.cuda,'device_count',return_value=1), \
+             patch.object(torch.cuda,'set_rng_state') as selected, \
+             patch.object(torch.cuda,'set_rng_state_all') as all_devices:
+            with self.assertWarns(RuntimeWarning):
+                restore_cuda_rng({'rng_cuda':states,'cuda_training_device':1},'cuda:0')
+            selected.assert_called_once_with(states[1],0)
+            all_devices.assert_not_called()
+            with self.assertRaisesRegex(ValueError,'Legacy CUDA RNG topology'):
+                restore_cuda_rng({'rng_cuda':states},'cuda:0')
+
+    def test_optimizer_step_is_not_counted_after_amp_overflow(self):
+        from src.training.runtime import optimizer_update_succeeded
+        from unittest.mock import Mock
+        scaler=Mock()
+        scaler.get_scale.side_effect=[16.,8.,8.,8.]
+        self.assertFalse(optimizer_update_succeeded(Mock(),scaler))
+        self.assertTrue(optimizer_update_succeeded(Mock(),scaler))
+
+    @unittest.skipUnless(real_torch_available(), 'PyTorch is not installed')
+    def test_low_disk_rejects_save_before_creating_checkpoint(self):
+        import torch
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as d:
+            model=torch.nn.Linear(2,1)
+            with patch('shutil.disk_usage',return_value=SimpleNamespace(free=0)):
+                with self.assertRaisesRegex(OSError,'disk space'):
+                    save_checkpoint(d,model,torch.optim.AdamW(model.parameters()),1)
+            self.assertFalse(list(Path(d).glob('checkpoint-*')))
+
+
 if __name__=='__main__': unittest.main()

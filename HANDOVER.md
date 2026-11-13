@@ -1,3 +1,5 @@
+> **Environment setup đã được thay thế:** dùng [KAGGLE.md](KAGGLE.md) và component profiles. Các mô tả Colab/Drive bên dưới là lịch sử, không phải Kaggle bootstrap hay bằng chứng GPU hiện tại.
+
 > **Kaggle pipeline correction:** Historical completion and benchmark claims below describe the earlier scaffold and are not evidence of trained-model performance. See [KAGGLE.md](KAGGLE.md) for the current real/smoke distinction, artifact contracts, reproducibility and validation limits. Full Kaggle GPU training has not been validated.
 
 # TÀI LIỆU BÀN GIAO KỸ THUẬT TOÀN DIỆN (TECHNICAL HANDOVER DOCUMENT)
@@ -306,10 +308,9 @@ Mọi notebook trong thư mục `notebooks/` đều tích hợp sẵn mã nguồ
 !nvidia-smi
 
 # 2. Cài đặt các gói phụ thuộc đặc thù tăng tốc GPU
-!pip install --upgrade pip
-!pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-!pip install transformers>=4.44.0 datasets>=2.20.0 accelerate>=0.33.0 peft>=0.12.0 trl>=0.9.6 bitsandbytes>=0.43.0
-!pip install xgrammar>=0.1.5 networkx sqlglot sentence-transformers pydantic tqdm
+# Không thay PyTorch/CUDA preinstalled. Chạy trên cold kernel theo KAGGLE.md:
+# Dùng cell setup của notebook hiện tại sau khi cấu hình KAGGLE.md.
+# Không chạy bootstrap Colab cũ bên dưới trên Kaggle.
 
 # 3. Kết nối an toàn với Google Drive
 from google.colab import drive

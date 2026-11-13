@@ -631,6 +631,8 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
         raise ValueError("Invalid GRPO length, temperature, KL, or clipping configuration")
     seed_everything(seed)
     rows = load_records(data_path)
+    for db_id in {row['db_id'] for row in rows}:
+        resolve_db(db_dir, db_id)
     resume = _resolve_resume(kwargs.get("resume_from_checkpoint", kwargs.get("resume")), output_dir)
     model, tokenizer = load_causal_model(kwargs.get("model_name_or_path", "meta-llama/Llama-3.2-3B-Instruct"),
         adapter_path=resume or sft_checkpoint, training=True, device=device,

@@ -354,7 +354,7 @@ class TestNativeLlamaPeftTraining(unittest.TestCase):
                 answer='SELECT x FROM t;') for i in range(4)]))
             hub = Hub(root/'cache')
             env = dict(CHECKPOINT_SYNC_ENABLED='1', CHECKPOINT_HF_REPO_ID='member2/private',
-                CHECKPOINT_EXPERIMENT_ID='sft-jepa-test', HF_TOKEN='test-secret',
+                CHECKPOINT_EXPERIMENT_ID='sft-jepa-test', HF_TOKEN='test-secret', HF_HUB_CACHE=str(root/'cache'),
                 CHECKPOINT_SYNC_FAILURE_POLICY='stop', CHECKPOINT_RESUME_SOURCE='none')
             common = dict(data_path=str(data), model_name_or_path=str(base), device='cpu',
                 epochs=3, max_length=256, lora_rank=2, gradient_accumulation_steps=2,
@@ -373,6 +373,8 @@ class TestNativeLlamaPeftTraining(unittest.TestCase):
                     **common)
                 # No output checkpoint is handed into session B.
                 Path(root/'session-a').rename(root/'archived-session-a')
+                base.rename(root/'relocated-base')
+                os.environ['BASE_MODEL_PATH'] = str(root/'relocated-base')
                 os.environ['CHECKPOINT_RESUME_SOURCE'] = 'remote'
                 resumed = run_sft_training(output_dir=str(root/'session-b'), max_steps=3,
                     **common)

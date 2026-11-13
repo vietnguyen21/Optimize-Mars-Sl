@@ -1,0 +1,3 @@
+-r kaggle-core.txt
+peft==0.15.2
+bitsandbytes==0.45.5

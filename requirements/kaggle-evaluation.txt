@@ -1,0 +1,3 @@
+-r kaggle-grounding.txt
+-r kaggle-generation.txt
+# XGrammar is optional; install a separately validated version only when requested.

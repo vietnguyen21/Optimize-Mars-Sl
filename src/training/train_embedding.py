@@ -436,7 +436,14 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
         evaluation_examples = build_embedding_examples(cards,heldout,db_dir)
     if max_steps < 1 or gradient_accumulation_steps < 1 or hard_negatives < 1 or save_steps < 1:
         raise ValueError('max_steps, gradient_accumulation_steps and hard_negatives must be positive')
-    model = SentenceTransformer(model_name_or_path, device=device, model_kwargs={'attn_implementation':'eager'})
+    from src.training.model_identity import model_identity, read_identity, verify_identity
+    expected_identity = read_identity(resume_from_checkpoint) if resume_from_checkpoint else None
+    identity, hf_options = model_identity(model_name_or_path, expected=expected_identity)
+    verify_identity(expected_identity, identity)
+    local_only = hf_options.pop('local_files_only', False)
+    model = SentenceTransformer(model_name_or_path, device=device, local_files_only=local_only,
+        model_kwargs={'attn_implementation':'eager'}, **hf_options)
+    model._training_base_identity = identity
     model.max_seq_length = max_length
     if hasattr(model[0].auto_model, 'gradient_checkpointing_enable'):
         model[0].auto_model.gradient_checkpointing_enable()
@@ -461,6 +468,10 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
     texts = [format_column_card_text(c) for c in cards]
     model.train()
     optimizer.zero_grad(set_to_none=True)
+    consecutive_skips = 0
+    max_skips = int(os.environ.get('AMP_MAX_CONSECUTIVE_SKIPS', '8'))
+    if max_skips < 1:
+        raise ValueError('AMP_MAX_CONSECUTIVE_SKIPS must be positive')
     while step < max_steps:
         sum_loss = 0.0
         for micro in range(gradient_accumulation_steps):
@@ -481,18 +492,29 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
             with torch.autocast(device_type='cuda' if amp else 'cpu', dtype=torch.float16 if amp else torch.bfloat16, enabled=amp):
                 vectors = model(inputs)['sentence_embedding']
                 loss = compute_hn_supcon_loss(vectors[0], vectors[1], list(vectors[2:]), margin, temperature)
+            if not torch.isfinite(loss):
+                raise FloatingPointError('Nonfinite objective; last complete checkpoint preserved')
             scaler.scale(loss / gradient_accumulation_steps).backward()
             sum_loss += float(loss.detach())
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        scaler.step(optimizer)
-        scaler.update()
+        from src.training.runtime import optimizer_update_succeeded
+        updated = optimizer_update_succeeded(optimizer, scaler)
         optimizer.zero_grad(set_to_none=True)
+        if not updated:
+            consecutive_skips += 1
+            log.log(event='optimizer_skipped', step=step, reason='AMP overflow')
+            if consecutive_skips >= max_skips:
+                raise FloatingPointError('Repeated AMP overflow; last complete checkpoint preserved')
+            continue
+        consecutive_skips = 0
         step += 1
         log.log(step=step, loss=sum_loss/gradient_accumulation_steps, phase='embedding')
         if step % save_steps == 0 or step == max_steps:
             save_checkpoint(output_dir, model, optimizer, step, tokenizer=None, scaler=scaler,
                             extra={'phase':'embedding','contract':contract})
+    from src.training.checkpoint_sync import finalize_checkpoint_backup
+    finalize_checkpoint_backup()
     model.eval()
     model.save(os.path.join(output_dir,'final'))
     metrics = None

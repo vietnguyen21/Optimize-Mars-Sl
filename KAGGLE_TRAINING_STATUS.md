@@ -2,6 +2,99 @@
 
 Status updated: 2026-11-11 (checkpoint synchronization); earlier training evidence recorded 2026-11-06. This report describes the current local implementation and the validation logs retained in this repository. It does not certify a successful Kaggle run.
 
+## GPU/HF acceptance workflow được chuẩn bị — 2026-11-11
+
+Hướng dẫn và tiêu chí: [KAGGLE_GPU_ACCEPTANCE.md](KAGGLE_GPU_ACCEPTANCE.md). **T4, P100, CUDA/NF4 thật, bootstrap trên fresh Kaggle, private Hub round-trip và hai session Kaggle: NOT EXECUTED.** Chưa production-ready; fixture pass không cho phép suy luận model 3B/7B fit GPU.
+
+Thay đổi riêng của acceptance workflow:
+
+| File | Nội dung |
+|---|---|
+| `src/training/acceptance.py` | Isolated tiny fixture dùng runtime/backend hiện có; exact model/optimizer/scheduler/scaler/RNG/predictor/reference/cursor proofs; tiny component probes; hardware/profile/import/disk gate; opt-in Hub round-trip và Session B download |
+| `scripts/run_kaggle_acceptance.py` | CLI mặc định không install/upload; CPU mode offline, output UUID riêng, JSON report và exit codes |
+| `tests/test_kaggle_acceptance.py` | 11 tests: safety, GPU profile guards, exact CPU continuation, separate-process restore, mocked Hub, sanitized errors và 5 tiny component probes |
+| `KAGGLE_GPU_ACCEPTANCE.md` | Checklist T4/P100, bootstrap, Session A/B, tài nguyên, expected output, diagnostics và gates trước full training |
+| `KAGGLE.md` | Link workflow và phạm vi bằng chứng |
+| `KAGGLE_TRAINING_STATUS.md` | Ghi kết quả acceptance-tool validation và giới hạn |
+
+Kết quả local mới (không thay thế các bảng lịch sử bên dưới):
+
+| Kiểm tra | Kết quả |
+|---|---|
+| `python -m unittest discover -s tests -v` — system Python | 256 tests, 227 passed, 29 dependency-required skips, 0 failures/errors; 1.249s |
+| Cùng suite — `/tmp/optimize-mars-validation/bin/python` | 256 passed, 0 skipped/failures/errors; 6.595s |
+| Acceptance tests riêng — native CPU | 11 passed; 5.285s |
+| `python scripts/run_smoke_tests.py` | 6/6 suites passed; 0.964s |
+| `scripts/check_kaggle_environment.py --smoke` | Passed local |
+| Acceptance CLI `--cpu-test` | PASS_LOCAL_CPU_ONLY; step 2 → 3, hashes và RNG continuation verified |
+| Syntax / notebooks | 55 Python files và 5 notebooks schema/code-cell AST passed |
+| Native `pip check` / `git diff --check` | Passed |
+
+Logs local: `/tmp/kaggle-acceptance-native.log`, `/tmp/kaggle-acceptance-system.log`, `/tmp/kaggle-acceptance-unit.log`, `/tmp/kaggle-acceptance-smoke.log`, `/tmp/acceptance-cli-cpu.log`. Môi trường CPU validation không phải Kaggle candidate profile. Không chạy full training, cài thêm package hoặc upload Hub thật. Session B yêu cầu operator xác nhận runtime mới; tool chỉ chứng minh destination trống, download từ Hub và exact replay. Fixture reference là frozen native module, còn tiny component probe kiểm PEFT reference API; vẫn cần actual research adapter integration trên Kaggle.
+
+## Remediation CRITICAL/HIGH sau environment audit — 2026-11-11
+
+Giữ custom training loops, objective và checkpoint native hiện có; không chuyển sang Trainer/TRL. **Chưa production-ready hoặc certified Kaggle image.** Các kiểm tra mới chỉ chạy offline/local với tiny random models và Hub giả lập; không cài dependency, tải pretrained model, chạy full training, upload Hub thật, commit hoặc push.
+
+Đã sửa: bootstrap import ML quá sớm bằng lazy public API; component profiles và CUDA constraints/dry-run/pip-check/snapshot; warm-kernel/version/import/GPU/NF4/disk guards; shared Secret resolver cho backup và model gated; model revision/base identity; local null manifest rejection; staged upload → read-back verification → publication; auto local fallback; canonical configuration; CUDA RNG mapping; optimizer step chỉ tăng khi update thành công; bounded AMP overflow; final backup trước calibration/export. Các notebook 01–05 dùng chung preflight, 05 vẫn không ghi training checkpoints.
+
+| Kiểm tra mới | Kết quả |
+|---|---|
+| System Python `python -m unittest discover -s tests -v` | 245 tests: 223 passed, 22 dependency-required skips, 0 failures/errors; 1.075s |
+| Native CPU validation environment cùng suite | 245 passed, 0 skipped/failures/errors; 4.314s |
+| `python scripts/run_smoke_tests.py` | 6/6 suites passed; 0.886s |
+| `python scripts/check_kaggle_environment.py --smoke` | Passed, không import GPU packages hoặc kết nối Hub |
+| Python syntax / notebook schema và code-cell AST | 52 Python files và cả 5 notebook passed |
+| Native `pip check` / `git diff --check` | Passed |
+
+Native environment vẫn là Python 3.14.10 + CPU torch 2.15.0, không phải target profile Python 3.10–3.12/Kaggle CUDA. BNB/Pydantic chưa được cài trong môi trường local này; NetworkX local khác pin. Do đó CPU test pass không xác minh installation của toàn bộ candidate profile. Installer được kiểm thử bằng resolver/process mocks, không thực sự chạy pip install. Logs mới: `/tmp/kaggle-fixes-system.log`, `/tmp/kaggle-fixes-native.log`, `/tmp/kaggle-fixes-smoke.log`.
+
+Regression coverage gồm failed staged verification không publish completion; retry khi mất phản hồi stage/publication; local `null` manifest; offline/incompatible remote fallback; canonical defaults/aliases; CUDA RNG topology qua mock; skipped AMP updates ở hai loop thật dùng tiny models; overflow hữu hạn; base relocation và changed-weight rejection; Hub commit pinning với metadata/Secret mocks; native SFT/GRPO resume khi cả output cũ lẫn base path gốc không còn. Không có CUDA context hoặc remote upload thật trong kiểm thử.
+
+### Từng file của remediation
+
+| File | Thay đổi |
+|---|---|
+| `src/training/__init__.py` | Lazy exports, giữ public API, không import Torch/Transformers khi chỉ bootstrap |
+| `src/training/environment.py` (mới) | Component profile parser; version/import/loaded-build checks; writable/disk và CUDA/NF4 primitive probes |
+| `src/training/kaggle.py` | Constrained pip dry-run/install, cold-kernel guard, sanitized dependency snapshot, input-path check, notebook environment gate |
+| `src/training/hf_auth.py` (mới) | Shared Kaggle Secret/env resolver; model Secret có thể tách khỏi write token; không persist login |
+| `src/training/model_identity.py` (mới) | Pin Hub SHA, hash local base/config/tokenizer, kiểm chứng relocated base bằng metadata và identity |
+| `src/training/checkpoint_sync.py` | Two-phase staging/publication, strict manifest parsing, canonical config + legacy compatibility, source-independent auto resume, cache budget và sanitized HTTP diagnostics |
+| `src/training/runtime.py` | Save-size budget, base identity checkpoint metadata, active CUDA device/RNG mapping, optimizer-update success helper |
+| `src/training/train_embedding.py` | Auth/revision/identity, nonfinite/AMP overflow guards, đúng step/cursor, final backup trước export/retrieval |
+| `src/training/train_decision_model.py` | Các guard tương tự; `reference_compile=False` cho ModernBERT; backup trước calibration |
+| `src/training/train_grpo_generator.py` | Kiểm tra SQLite database paths trước khi load model |
+| `src/validation/laya_scorer.py` | Shared loader options và tắt ModernBERT auto compiler khi inference |
+| `requirements.txt` | Một entry point cùng application profile, bỏ dependency không dùng trong core |
+| `requirements-kaggle.txt` | All-component candidate profile thay vì duplicate declarations |
+| `requirements/kaggle-core.txt` (mới) | Shared API pins/ranges, tokenizers pin; torch do image cung cấp |
+| `requirements/kaggle-grounding.txt` (mới) | Sentence Transformers profile, không BNB/PEFT |
+| `requirements/kaggle-generation.txt` (mới) | PEFT/BNB profile cho SFT/GRPO |
+| `requirements/kaggle-evaluation.txt` (mới) | Kết hợp inference dependencies; XGrammar vẫn optional |
+| `requirements/kaggle-dev.txt` (mới) | Thêm notebook validation tooling |
+| `docs/specifications/requirements.txt` | Redirect legacy dependency entry point về nguồn chung |
+| `scripts/check_kaggle_environment.py` (mới) | CLI smoke/preflight không model download hoặc Hub writes |
+| `notebooks/01_data_preparation_and_embedding.ipynb` | Grounding bootstrap/profile/environment gate trước model |
+| `notebooks/02_sft_and_jepa_training_3b.ipynb` | Generation bootstrap/profile/environment gate |
+| `notebooks/03_grpo_training_3b_and_7b.ipynb` | Generation bootstrap/profile/environment gate |
+| `notebooks/04_system1_laya421m_training.ipynb` | Core bootstrap/profile/environment gate |
+| `notebooks/05_end_to_end_evaluation.ipynb` | Evaluation environment gate; không thêm checkpoint writer |
+| `tests/test_kaggle_environment.py` (mới) | Bootstrap isolation, resolver/CUDA/warm-import guards, disk, auth, identity và revision mocks |
+| `tests/test_checkpoint_sync.py` | Two-phase protocol expectations và regression cho manifest/publication/fallback/config |
+| `tests/test_runtime.py` | GPU topology mock, AMP-success detection và low-disk save rejection |
+| `tests/test_grounding_system1_pipeline.py` | Mock metadata loader đúng phạm vi; tiny-loop skip/overflow regression |
+| `tests/test_generation_training.py` | Native mocked-Hub recovery với relocated base và cache tạm |
+| `tests/test_hf_grounding_system1.py` | Assert ModernBERT compiler luôn tắt khi train/load scorer |
+| `KAGGLE.md` | Bootstrap/profile/Secret/recovery instructions tiếng Việt và giới hạn thực tế |
+| `HANDOVER.md` | Đánh dấu setup cũ là lịch sử; bỏ shell install gây thay CUDA/redirect sai |
+| `docs/specifications/05_environment_and_colab_guide.md` | Deprecation notice, bỏ CLI flags không còn tồn tại và sửa recovery expectations |
+| `KAGGLE_TRAINING_STATUS.md` | Kết quả kiểm tra và inventory của remediation này |
+
+Giới hạn còn lại: cần test trên T4/P100 thật và Hub private thật ở hai phiên Kaggle; cần memory/storage/network profiling, đặc biệt 7B. Profiles chưa là full transitive lock; warm preloaded packages không tương thích sẽ bị từ chối thay vì sửa trong kernel đang chạy. CUDA hardware khác không bảo đảm bitwise identity. Legacy artifacts không có base identity hoặc active device phải được xác minh/migrate rõ ràng. Disk estimates không biết mọi quota/serialization overhead; staging và checkpoints được giữ, không auto-delete. Inference `final/`, calibration/index/graphs/splits ngoài checkpoint vẫn cần handoff riêng. Account ownership không khóa hai workers dùng cùng account/ID.
+
+**Các mục checkpoint/training bên dưới là lịch sử triển khai trước remediation này; dùng kết quả mới ở trên cho working tree hiện tại.**
+
 **Implemented and CPU-validated:** real training objectives, native tiny-model training/export/resume, and independent evaluation code. **Not yet accepted on target hardware:** full-size pretrained training, CUDA/NF4 operation, native XGrammar, and measured T4 memory/latency. Historical scaffold accuracy claims in older project documents are not benchmark evidence.
 
 ## Cập nhật đồng bộ checkpoint — 2026-11-11

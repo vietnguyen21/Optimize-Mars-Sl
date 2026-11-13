@@ -7,6 +7,7 @@ import os
 import random
 import time
 import tempfile
+import warnings
 
 
 @dataclass
@@ -94,6 +95,56 @@ def latest_checkpoint(output_dir):
     return str(max(candidates)[1]) if candidates else None
 
 
+def checkpoint_size_estimate(model, optimizer, extra=None):
+    """Conservative tensor payload budget; includes external predictors in extra."""
+    def tensor_bytes(value):
+        if hasattr(value, 'numel') and hasattr(value, 'element_size'):
+            return value.numel() * value.element_size()
+        if isinstance(value, dict):
+            return sum(tensor_bytes(v) for v in value.values())
+        if isinstance(value, (list, tuple)):
+            return sum(tensor_bytes(v) for v in value)
+        return 0
+    if hasattr(model, 'peft_config'):
+        weights = sum(p.numel() * p.element_size() for name, p in model.named_parameters()
+                      if 'lora_' in name or 'modules_to_save' in name)
+    else:
+        weights = tensor_bytes(model.state_dict())
+    return int((weights + tensor_bytes(optimizer.state_dict()) + tensor_bytes(extra or {})) * 1.2) + 1024**2
+
+
+def restore_cuda_rng(state, device=None):
+    import torch
+    states = state.get('rng_cuda')
+    if not torch.cuda.is_available() or not states:
+        return
+    target = torch.device(device or 'cuda')
+    if target.type != 'cuda':
+        return
+    target_index = torch.cuda.current_device() if target.index is None else target.index
+    saved_device = state.get('cuda_training_device')
+    if saved_device is None:
+        if len(states) != torch.cuda.device_count():
+            raise ValueError('Legacy CUDA RNG topology differs; original active GPU is unknown. Resume on the original topology first')
+        torch.cuda.set_rng_state_all(states)
+        return
+    saved_index = int(saved_device)
+    if not 0 <= saved_index < len(states):
+        raise ValueError('Invalid checkpoint CUDA device mapping')
+    if len(states) == torch.cuda.device_count() and saved_index == target_index:
+        torch.cuda.set_rng_state_all(states)
+    else:
+        warnings.warn('CUDA topology changed: restoring the training GPU RNG on the selected device; bitwise GPU reproducibility is not guaranteed', RuntimeWarning)
+        torch.cuda.set_rng_state(states[saved_index], target_index)
+
+
+def optimizer_update_succeeded(optimizer, scaler):
+    old_scale = scaler.get_scale()
+    scaler.step(optimizer)
+    scaler.update()
+    return scaler.get_scale() >= old_scale
+
+
 def save_checkpoint(output_dir, model, optimizer, step, *, scaler=None, scheduler=None, extra=None, tokenizer=None):
     """Save complete model/optimizer/RNG state; completion marker written last.
 
@@ -107,6 +158,15 @@ def save_checkpoint(output_dir, model, optimizer, step, *, scaler=None, schedule
         raise FileExistsError(f'Checkpoint already exists: {destination}')
     # Interrupted writes remain hidden for inspection and cannot block retrying
     # the same optimizer step after recovery from an earlier complete checkpoint.
+    from src.training.environment import check_disk
+    estimate = checkpoint_size_estimate(model, optimizer, extra)
+    check_disk(destination.parent, estimate)
+    from src.training.checkpoint_sync import ACTIVE_SYNC
+    sync = ACTIVE_SYNC.get()
+    if sync is not None and sync.enabled:
+        # Both native checkpoint and read-back cache can reside on the same disk.
+        from src.training.environment import check_transfer_disk
+        check_transfer_disk(destination.parent, sync.cache_dir or destination.parent, estimate)
     path = Path(tempfile.mkdtemp(prefix=f'.checkpoint-{step}-', dir=destination.parent))
     if hasattr(model, 'save_pretrained'):
         model.save_pretrained(str(path))
@@ -115,7 +175,13 @@ def save_checkpoint(output_dir, model, optimizer, step, *, scaler=None, schedule
         model_state = model.state_dict()
     if tokenizer is not None:
         tokenizer.save_pretrained(str(path))
-    state = dict(step=step, model=model_state, optimizer=optimizer.state_dict(),
+    from src.training.model_identity import IDENTITY_FILE
+    base_identity = getattr(model, '_training_base_identity', None)
+    if base_identity is not None:
+        (path / IDENTITY_FILE).write_text(json.dumps(base_identity, sort_keys=True))
+    training_device = next(model.parameters()).device
+    cuda_device = (torch.cuda.current_device() if training_device.index is None else training_device.index) if training_device.type == 'cuda' else None
+    state = dict(cuda_training_device=cuda_device, step=step, model=model_state, optimizer=optimizer.state_dict(),
                  rng_python=random.getstate(), rng_numpy=np.random.get_state(),
                  rng_torch=torch.get_rng_state(),
                  rng_cuda=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -151,6 +217,14 @@ def load_checkpoint(path, model, optimizer=None, *, scaler=None, scheduler=None,
         raise ValueError('Training state step differs from manifest')
     if expected_extra and any(state.get('extra', {}).get(k) != v for k, v in expected_extra.items()):
         raise ValueError('Resume checkpoint dataset/configuration mismatch')
+    from src.training.model_identity import read_identity, verify_identity
+    identity = getattr(model, '_training_base_identity', None)
+    if identity is not None:
+        verify_identity(read_identity(p), identity)
+    # Validate topology before modifying model/optimizer state.
+    active_device = next(model.parameters()).device
+    if active_device.type == 'cuda' and state.get('rng_cuda') and state.get('cuda_training_device') is None and len(state['rng_cuda']) != torch.cuda.device_count():
+        raise ValueError('Legacy CUDA RNG topology differs; original training device is unknown')
     if state['model'] is not None:
         model.load_state_dict(state['model'])
     elif (p / 'adapter_config.json').exists():
@@ -170,8 +244,7 @@ def load_checkpoint(path, model, optimizer=None, *, scaler=None, scheduler=None,
     random.setstate(state['rng_python'])
     np.random.set_state(state['rng_numpy'])
     torch.set_rng_state(state['rng_torch'])
-    if torch.cuda.is_available() and state['rng_cuda'] is not None:
-        torch.cuda.set_rng_state_all(state['rng_cuda'])
+    restore_cuda_rng(state, active_device)
     return state
 
 
@@ -184,7 +257,17 @@ def load_causal_model(model_name_or_path, adapter_path=None, training=False, dev
     if (Path(source) / 'adapter_config.json').exists():
         adapter_path = source
         model_name_or_path = os.environ.get('BASE_MODEL_PATH') or PeftConfig.from_pretrained(source).base_model_name_or_path
-    tokenizer = AutoTokenizer.from_pretrained(source)
+    from src.training.model_identity import model_identity, read_identity, verify_identity
+    expected = read_identity(source) if adapter_path else None
+    identity, base_options = model_identity(model_name_or_path, expected=expected)
+    verify_identity(expected, identity)
+    if adapter_path and expected is None and os.environ.get('BASE_MODEL_PATH'):
+        if os.environ.get('ALLOW_LEGACY_BASE_OVERRIDE') != '1':
+            raise ValueError('Legacy adapter has no base identity; verify original base and explicitly set ALLOW_LEGACY_BASE_OVERRIDE=1 to migrate')
+        warnings.warn('Legacy base override approved without historical identity; verify source provenance', RuntimeWarning)
+    from src.training.hf_auth import model_hf_options
+    tokenizer_options = model_hf_options(source) if adapter_path else base_options
+    tokenizer = AutoTokenizer.from_pretrained(source, **tokenizer_options)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = 'right' if training else 'left'
@@ -196,7 +279,7 @@ def load_causal_model(model_name_or_path, adapter_path=None, training=False, dev
     if use_cuda:
         options['quantization_config'] = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4',
             bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.float16)
-    model = AutoModelForCausalLM.from_pretrained(model_name_or_path, **options)
+    model = AutoModelForCausalLM.from_pretrained(model_name_or_path, **options, **base_options)
     if use_cuda and training:
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True,
                                                 gradient_checkpointing_kwargs={'use_reentrant': False})
@@ -212,4 +295,5 @@ def load_causal_model(model_name_or_path, adapter_path=None, training=False, dev
         model.train()
     else:
         model.eval()
+    model._training_base_identity = expected or identity
     return model, tokenizer

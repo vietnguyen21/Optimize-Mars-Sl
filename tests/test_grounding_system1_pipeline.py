@@ -145,7 +145,8 @@ class TinyAutogradLoops(unittest.TestCase):
                 torch.save(self.state_dict(),Path(path)/'tiny_weights.pt')
 
         module=types.ModuleType('sentence_transformers');module.SentenceTransformer=TinySentence
-        with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules,{'sentence_transformers':module}):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules,{'sentence_transformers':module}), \
+             patch('src.training.model_identity.model_identity', return_value=({'kind':'local','files':{'mock.safetensors':'0'*64}}, {})):
             root=Path(directory); cards=root/'cards.json'; data=root/'train.json'
             cards.write_text(json.dumps([dict(db_id='db',table_name='t',column_name=c) for c in ['id','value','other']]))
             data.write_text(json.dumps([dict(db_id='db',question='Find identifier',positive_columns=['t.id'])]))
@@ -163,6 +164,24 @@ class TinyAutogradLoops(unittest.TestCase):
                 self.assertTrue(torch.equal(a[key],b[key]),key)
             first_weights=torch.load(root/'first'/'final'/'tiny_weights.pt',weights_only=True)
             self.assertFalse(torch.equal(a['projection.weight'],first_weights['projection.weight']))
+
+            from src.training.runtime import optimizer_update_succeeded
+            attempts = []
+            def skip_once(optimizer, scaler):
+                attempts.append(True)
+                return False if len(attempts) == 1 else optimizer_update_succeeded(optimizer, scaler)
+            with patch('src.training.runtime.optimizer_update_succeeded', side_effect=skip_once):
+                skipped = embedding.run_embedding_training(output_dir=str(root/'skipped'),max_steps=1,**common)
+            self.assertEqual(skipped['step'],1)
+            self.assertEqual(len(attempts),2)
+            import os
+            with patch.dict(os.environ, AMP_MAX_CONSECUTIVE_SKIPS='2'), patch('src.training.runtime.optimizer_update_succeeded',return_value=False):
+                with self.assertRaisesRegex(FloatingPointError,'Repeated AMP overflow'):
+                    embedding.run_embedding_training(output_dir=str(root/'always-overflow'),max_steps=1,**common)
+            skipped_weights=torch.load(root/'skipped'/'final'/'tiny_weights.pt',weights_only=True)
+            for key in first_weights:
+                torch.testing.assert_close(first_weights[key],skipped_weights[key],rtol=0,atol=0)
+
 
     def test_decision_optimizer_and_resume(self):
         import json
@@ -208,7 +227,8 @@ class TinyAutogradLoops(unittest.TestCase):
 
         module=types.ModuleType('transformers')
         module.AutoTokenizer=TinyTokenizer;module.AutoModelForSequenceClassification=TinyClassifier
-        with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules,{'transformers':module}):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules,{'transformers':module}), \
+             patch('src.training.model_identity.model_identity', return_value=({'kind':'local','files':{'mock.safetensors':'0'*64}}, {})):
             root=Path(directory);data=root/'candidates.json'
             rows=[dict(db_id='db',question=f'Question {i}',schema='CREATE TABLE t(id INT);',
                         sql=f'SELECT {label}',label=label) for i in range(12) for label in [0,1]]
@@ -227,6 +247,24 @@ class TinyAutogradLoops(unittest.TestCase):
                 self.assertTrue(torch.equal(a[key],b[key]),key)
             first_weights=torch.load(root/'first'/'final'/'tiny_weights.pt',weights_only=True)
             self.assertFalse(torch.equal(a['classifier.weight'],first_weights['classifier.weight']))
+
+            from src.training.runtime import optimizer_update_succeeded
+            attempts = []
+            def skip_once(optimizer, scaler):
+                attempts.append(True)
+                return False if len(attempts) == 1 else optimizer_update_succeeded(optimizer, scaler)
+            with patch('src.training.runtime.optimizer_update_succeeded', side_effect=skip_once):
+                skipped = decision.run_decision_model_training(output_dir=str(root/'skipped'),max_steps=1,**common)
+            self.assertEqual(skipped['step'],1)
+            self.assertEqual(len(attempts),2)
+            import os
+            with patch.dict(os.environ, AMP_MAX_CONSECUTIVE_SKIPS='2'), patch('src.training.runtime.optimizer_update_succeeded',return_value=False):
+                with self.assertRaisesRegex(FloatingPointError,'Repeated AMP overflow'):
+                    decision.run_decision_model_training(output_dir=str(root/'always-overflow'),max_steps=1,**common)
+            skipped_weights=torch.load(root/'skipped'/'final'/'tiny_weights.pt',weights_only=True)
+            for key in first_weights:
+                torch.testing.assert_close(first_weights[key],skipped_weights[key],rtol=0,atol=0)
+
             self.assertGreater(resumed['temperature'],0)
             scorer=LayaScorer(model_path=resumed['model_path'],device='cpu',dry_run=False)
             with patch.object(scorer,'_compute_calibrated_logit',side_effect=AssertionError('heuristic used')):

@@ -21,7 +21,10 @@ MANIFEST = 'checkpoint_manifest.json'
 
 
 class SyncError(RuntimeError):
-    pass
+    def __init__(self, message, *, http_status=None, category=None):
+        super().__init__(message)
+        self.http_status = http_status
+        self.category = category or type(self).__name__
 
 
 def digest(path):
@@ -71,7 +74,13 @@ def validate_manifest(m):
 
 def verify(path, manifest=None):
     path = Path(path)
-    m = manifest or (json.loads((path / MANIFEST).read_text()) if (path / MANIFEST).exists() else None)
+    manifest_path = path / MANIFEST
+    if manifest is not None:
+        m = validate_manifest(manifest)
+    elif manifest_path.exists():
+        m = validate_manifest(json.loads(manifest_path.read_text()))
+    else:
+        m = None
     actual = files_metadata(path)
     if m is not None:
         validate_manifest(m)
@@ -99,6 +108,10 @@ class CheckpointSync:
             raise ValueError('Invalid checkpoint sync policy/interval/attempts (1..6)')
         self.api, self.download, self.sleep = api, download, sleep
         self.count, self.last = 0, None
+        self.configuration = None
+        self.legacy_compatibility = None
+        self.remote_error = None
+        self.cache_dir = None
         self.verified_uploads = set()
         self.prefix = f'checkpoints/{self.experiment}/{stage}'
         if self.enabled:
@@ -109,18 +122,21 @@ class CheckpointSync:
                 raise ValueError('Set CHECKPOINT_HF_REPO_ID and a unique CHECKPOINT_EXPERIMENT_ID')
             if api is None:
                 from huggingface_hub import HfApi, hf_hub_download
-                secret = os.environ.get('CHECKPOINT_HF_TOKEN_SECRET', 'HF_TOKEN')
-                token = os.environ.get(secret)
-                if not token:
-                    try:
-                        from kaggle_secrets import UserSecretsClient
-                        token = UserSecretsClient().get_secret(secret)
-                    except Exception:
-                        raise SyncError('HF token unavailable: configure Kaggle Secrets or secure environment') from None
+                from src.training.hf_auth import hf_token
+                token = hf_token(required=True)
                 self.api = HfApi(token=token)
+                self.cache_dir = Path(os.environ.get('HF_HUB_CACHE', os.environ.get('HUGGINGFACE_HUB_CACHE', str(Path(os.environ.get('HF_HOME', str(Path.home() / '.cache' / 'huggingface'))) / 'hub'))))
                 self.download = lambda name, revision: hf_hub_download(self.repo, name, repo_type='model', revision=revision, token=token)
             # Privacy/ownership preflight is mandatory even under warn policy.
-            self._retry(self._info if self.read_only else self._claim)
+            try:
+                self._retry(self._info if self.read_only else self._claim)
+            except SyncError as exc:
+                # No upload without a later successful private/owner check. Auto
+                # may still recover a verified local checkpoint under warn policy.
+                if self.policy == 'stop':
+                    raise
+                self.remote_error = exc
+                self._failure(exc)
 
     def _retry(self, action):
         for attempt in range(self.attempts):
@@ -131,7 +147,9 @@ class CheckpointSync:
             except Exception as exc:
                 if attempt + 1 == self.attempts:
                     # Never interpolate provider exception messages (may include credentials).
-                    raise SyncError(f'Checkpoint service failed ({type(exc).__name__}); check authentication/network/storage') from None
+                    status = getattr(getattr(exc, 'response', None), 'status_code', None)
+                    raise SyncError(f'Checkpoint service failed ({type(exc).__name__}, HTTP {status}); check authentication/network/storage',
+                                    http_status=status, category=type(exc).__name__) from None
                 self.sleep(min(2 ** attempt, 16))
 
     def _info(self):
@@ -165,14 +183,18 @@ class CheckpointSync:
             handle.write(json.dumps(record) + '\n')
 
     def _failure(self, exc):
-        self._event(success=False, error=type(exc).__name__)
+        status = getattr(exc, 'http_status', None) or getattr(getattr(exc, 'response', None), 'status_code', None)
+        category = getattr(exc, 'category', type(exc).__name__)
+        self._event(success=False, error=category, http_status=status)
         if self.policy == 'stop':
-            raise SyncError('Remote backup unsuccessful; local checkpoint preserved') from None
+            raise SyncError(f'Remote backup unsuccessful ({category}, HTTP {status}); local checkpoint preserved',
+                            http_status=status, category=category) from None
         warnings.warn('REMOTE BACKUP UNSUCCESSFUL; local checkpoint preserved. Check HF authentication/network/storage.', RuntimeWarning)
 
     def prepare_manifest(self, path, step, extra):
         m = dict(version=1, status='complete', step=step, stage=self.stage,
                  experiment_id=self.experiment, compatibility=self.compatibility,
+                 compatibility_version=2, configuration=self.configuration,
                  dataset_configuration_fingerprint=fingerprint(dict(contract=extra.get('contract'), dataset=extra.get('dataset_fingerprint'))),
                  files=files_metadata(path))
         (Path(path) / MANIFEST).write_text(json.dumps(m, indent=2, sort_keys=True))
@@ -208,32 +230,66 @@ class CheckpointSync:
 
     def _upload(self, path):
         from huggingface_hub import CommitOperationAdd
+        from src.training.environment import check_disk
         if self.read_only:
-            raise PermissionError("Read-only checkpoint backend cannot upload")
-        self._claim()
+            raise PermissionError('Read-only checkpoint backend cannot upload')
+        self._claim()  # Recheck privacy/owner on every attempt, including after outage.
         m = verify(path)
         if m is None or m['stage'] != self.stage or m['experiment_id'] != self.experiment:
             raise ValueError('Checkpoint namespace mismatch or missing manifest')
-        info = self._info()
-        names = self.api.list_repo_files(self.repo, repo_type='model', revision=info.sha)
+        payload = sum(f['size'] for f in m['files'].values())
+        cache = self.cache_dir or self.output
+        check_disk(cache, payload)  # Read-back verification may populate the Hub cache.
         prefix = f"{self.prefix}/checkpoint-{m['step']}"
         manifest_name = prefix + '/' + MANIFEST
-        skipped = manifest_name in names
-        if skipped:
+
+        def existing(info, names):
+            if manifest_name not in names:
+                return False
             if self._read(manifest_name, info.sha) != m:
                 raise ValueError('Completed remote checkpoint is immutable; conflicting step')
+            self._verify_remote(prefix, info.sha, m)
+            return True
+
+        info = self._info()
+        names = self.api.list_repo_files(self.repo, repo_type='model', revision=info.sha)
+        if existing(info, names):
+            return dict(step=m['step'], bytes=0, skipped=True)
+        if any(n.startswith(prefix + '/') for n in names):
+            raise ValueError('Unexpected partial published namespace; refusing overwrite')
+
+        # Content-addressed staging is invisible to discovery. Keep it for retries
+        # and investigation; Hub deduplicates immutable large blobs by content.
+        pending = f'{self.prefix}/_uploads/{fingerprint(m)}'
+        intent = pending + '/INTENT.json'
+        if intent in names:
+            if self._read(intent, info.sha) != m:
+                raise ValueError('Conflicting staged upload intent')
             revision = info.sha
         else:
-            if any(n.startswith(prefix + '/') for n in names):
-                raise ValueError('Unexpected partial remote namespace; refusing overwrite')
-            operations = [CommitOperationAdd(path_in_repo=prefix + '/' + n, path_or_fileobj=str(Path(path) / n)) for n in m['files']]
-            operations.append(CommitOperationAdd(path_in_repo=manifest_name, path_or_fileobj=json.dumps(m, sort_keys=True).encode()))
+            operations = [CommitOperationAdd(path_in_repo=pending + '/' + n,
+                path_or_fileobj=str(Path(path) / n)) for n in m['files']]
+            operations.append(CommitOperationAdd(path_in_repo=intent,
+                path_or_fileobj=json.dumps(m, sort_keys=True).encode()))
             commit = self.api.create_commit(self.repo, repo_type='model', operations=operations,
-                parent_commit=info.sha, commit_message=f"Complete {self.stage} checkpoint {m['step']}")
+                parent_commit=info.sha, commit_message=f"Stage {self.stage} checkpoint {m['step']}")
             revision = commit.oid
-        # Verify the immutable remote bytes, including on retry after a lost response.
-        self._verify_remote(prefix, revision, m)
-        return dict(step=m['step'], bytes=0 if skipped else sum(f['size'] for f in m['files'].values()), skipped=skipped)
+        self._verify_remote(pending, revision, m)
+        verify(path, m)  # Local bytes must still equal the verified staged bytes.
+        info = self._info()
+        names = self.api.list_repo_files(self.repo, repo_type='model', revision=info.sha)
+        if existing(info, names):
+            return dict(step=m['step'], bytes=0, skipped=True)
+        if any(n.startswith(prefix + '/') for n in names):
+            raise ValueError('Conflicting published checkpoint namespace')
+        operations = [CommitOperationAdd(path_in_repo=prefix + '/' + n,
+            path_or_fileobj=str(Path(path) / n)) for n in m['files']]
+        operations.append(CommitOperationAdd(path_in_repo=manifest_name,
+            path_or_fileobj=json.dumps(m, sort_keys=True).encode()))
+        commit = self.api.create_commit(self.repo, repo_type='model', operations=operations,
+            parent_commit=info.sha, commit_message=f"Publish verified {self.stage} checkpoint {m['step']}")
+        self._verify_remote(prefix, commit.oid, m)
+        return dict(step=m['step'], bytes=payload, skipped=False)
 
     def _verify_remote(self, prefix, revision, m):
         validate_manifest(m)
@@ -256,7 +312,7 @@ class CheckpointSync:
                 m = validate_manifest(self._retry(lambda: self._read(name, info.sha)))
                 if m['stage'] != self.stage or m['experiment_id'] != self.experiment:
                     raise ValueError('Remote manifest namespace mismatch')
-                if compatible_only and m.get('compatibility') != self.compatibility:
+                if compatible_only and not self.compatible(m):
                     continue
                 prefix = name.rsplit('/', 1)[0]
                 if prefix.rsplit('/', 1)[1] != f"checkpoint-{m['step']}":
@@ -278,8 +334,8 @@ class CheckpointSync:
                 raise FileExistsError('Local checkpoint conflicts with remote; use a new output directory')
             return str(dest)
         required = sum(f['size'] for f in m['files'].values())
-        if shutil.disk_usage(self.output).free < required * 2 + 1024 * 1024:
-            raise OSError('Insufficient disk space for checkpoint download and staging')
+        from src.training.environment import check_transfer_disk
+        check_transfer_disk(self.output, self.cache_dir or self.output, required)
         # Preserve interrupted staging folders; Hub cache resumes partial transfers.
         staging = Path(tempfile.mkdtemp(prefix='.checkpoint-download-', dir=self.output))
         for name in m['files']:
@@ -292,6 +348,12 @@ class CheckpointSync:
         staging.rename(dest)
         return str(dest)
 
+    def compatible(self, manifest):
+        value = manifest.get('compatibility')
+        return value == self.compatibility or (
+            manifest.get('compatibility_version', 1) == 1
+            and self.legacy_compatibility is not None and value == self.legacy_compatibility)
+
     def resolve(self, source=None):
         source = source or os.environ.get('CHECKPOINT_RESUME_SOURCE', 'none')
         if source == 'none':
@@ -300,7 +362,7 @@ class CheckpointSync:
             if not Path(source).exists():
                 raise FileNotFoundError('Explicit resume checkpoint does not exist')
             m = verify(source)
-            if m and (m['stage'] != self.stage or m.get('compatibility') != self.compatibility):
+            if m and (m['stage'] != self.stage or not self.compatible(m)):
                 raise ValueError('Resume dataset/configuration mismatch')
             self.last = str(source)
             return str(source)
@@ -313,7 +375,7 @@ class CheckpointSync:
             had_local_checkpoints = True
             try:
                 m = verify(p)
-                if m and (m['stage'] != self.stage or m.get('compatibility') != self.compatibility):
+                if m and (m['stage'] != self.stage or not self.compatible(m)):
                     incompatible_local = True
                     continue
                 local.append((int(p.name.split('-')[-1]), str(p)))
@@ -321,14 +383,22 @@ class CheckpointSync:
                 continue
         local.sort(reverse=True)
         remote = []
-        if source in ('remote', 'auto'):
-            if not self.enabled:
-                raise ValueError('Remote resume requires CHECKPOINT_SYNC_ENABLED=1')
-            # Resume failures must never silently turn into fresh training.
-            all_remote = self.remote_candidates(compatible_only=False)
-            remote = [c for c in all_remote if c[3].get('compatibility') == self.compatibility]
-            if all_remote and not remote:
-                raise ValueError('Remote checkpoint dataset/configuration mismatch; choose the original configuration or a new experiment')
+        remote_failed = False
+        remote_incompatible = False
+        if source in ('remote', 'auto') and self.enabled:
+            try:
+                all_remote = self.remote_candidates(compatible_only=False)
+                remote = [c for c in all_remote if self.compatible(c[3])]
+                remote_incompatible = bool(all_remote and not remote)
+            except (SyncError, OSError, ValueError) as exc:
+                if source == 'remote' or self.policy == 'stop' or not local:
+                    raise
+                remote_failed = True
+                self._failure(exc)
+        elif source == 'remote':
+            raise ValueError('Remote resume requires CHECKPOINT_SYNC_ENABLED=1')
+        if remote_incompatible and not local:
+            raise ValueError('Remote checkpoint dataset/configuration mismatch')
         print(json.dumps(dict(latest_completed_local_step=local[0][0] if local else None,
                               latest_remote_manifest_step=remote[0][0] if remote else None)))
         choices = [(s, 'local', p) for s, p in local] if source != 'remote' else []
@@ -338,10 +408,18 @@ class CheckpointSync:
                 self.last = value if kind == 'local' else self.fetch(value)
                 print(json.dumps(dict(resume_checkpoint=self.last, verified_completed_step=int(Path(self.last).name.split('-')[-1]))))
                 return self.last
-            except ValueError:
-                if kind == 'local':
+            except (ValueError, SyncError, OSError) as exc:
+                if kind == 'local' or isinstance(exc, FileExistsError):
                     raise
-                self._event(success=False, error='InvalidRemoteCheckpoint')
+                if not isinstance(exc, ValueError):
+                    if source == 'remote' or self.policy == 'stop':
+                        raise
+                    remote_failed = True
+                    self._failure(exc)
+                else:
+                    self._event(success=False, error='InvalidRemoteCheckpoint')
+        if remote_failed:
+            raise SyncError('Remote unavailable and no verified local checkpoint; refusing fresh restart')
         if source == 'auto' and not local and not remote:
             if incompatible_local:
                 raise ValueError('Local checkpoint dataset/configuration mismatch')
@@ -349,6 +427,16 @@ class CheckpointSync:
                 raise ValueError('Local checkpoints exist but none are valid; refusing fresh restart')
             return None
         raise FileNotFoundError('No valid compatible completed checkpoint available for requested resume')
+
+
+STAGE_DEFAULTS = {
+    'sft_jepa_3b': dict(max_length=1024, seed=42, gradient_accumulation_steps=8,
+        lambda_jepa=1.0, loss_dropout=0.5, predictor_dim=256, lora_rank=16,
+        model_name_or_path='meta-llama/Llama-3.2-3B-Instruct'),
+    'grpo_3b': dict(max_length=1024, seed=42, gradient_accumulation_steps=1,
+        max_new_tokens=128, clip_eps=0.2, beta_kl=0.04, temperature=1.0,
+        lora_rank=16, model_name_or_path='meta-llama/Llama-3.2-3B-Instruct'),
+}
 
 
 def persistent_training(stage):
@@ -365,7 +453,7 @@ def persistent_training(stage):
                 return fn(*args, **kwargs)
             output = values.get('output_dir') or f'/kaggle/working/{stage}'
             excluded = {'output_dir', 'export_dir', 'drive_dir', 'resume_from_checkpoint', 'resume', 'max_steps', 'epochs', 'num_epochs', 'save_steps', 'device', 'model', 'tokenizer', 'sft_checkpoint', 'adapter_path', 'dry_run', 'eval_path'}
-            contract = {}
+            legacy_contract = {}
             for key, value in values.items():
                 if key in excluded:
                     continue
@@ -373,8 +461,23 @@ def persistent_training(stage):
                     value = digest(value)
                 if key == 'db_dir' and value:
                     value = {p.relative_to(value).as_posix(): digest(p) for p in sorted(Path(value).rglob('*.sqlite'))}
-                contract[key] = value
-            manager = CheckpointSync(output, stage, fingerprint(contract))
+                legacy_contract[key] = value
+            effective = dict(legacy_contract)
+            if stage == 'sft_jepa_3b' and 'max_seq_length' in effective:
+                effective.setdefault('max_length', effective.pop('max_seq_length'))
+            if stage == 'grpo_3b' and 'group_size' in effective:
+                effective['num_rollouts'] = effective.pop('group_size')
+            model_source = str(effective.get('model_name_or_path', ''))
+            if stage in ('sft_jepa_3b', 'grpo_3b') and model_source and (Path(model_source).is_dir() or Path(model_source).is_absolute() or model_source.startswith('./') or model_source.startswith('../')):
+                effective['model_name_or_path'] = 'local-base-identity-verified-by-loader'
+            for key, value in STAGE_DEFAULTS.get(stage, {}).items():
+                effective[key] = type(value)(effective.get(key, value))
+            if stage == 'grpo_3b' and 'num_rollouts' in effective:
+                effective['num_rollouts'] = int(effective['num_rollouts'])
+            effective = json.loads(json.dumps(effective, default=str))
+            manager = CheckpointSync(output, stage, fingerprint(effective))
+            manager.configuration = effective
+            manager.legacy_compatibility = fingerprint(legacy_contract)
             source = values.get('resume_from_checkpoint') or values.get('resume')
             resolved = manager.resolve(source)
             if 'resume_from_checkpoint' in bound.arguments:
@@ -417,3 +520,12 @@ def download_checkpoint_artifact(output_dir, stage):
         except ValueError:
             continue
     raise FileNotFoundError('No verified remote artifact available')
+
+
+def finalize_checkpoint_backup():
+    manager = ACTIVE_SYNC.get()
+    if manager is not None and manager.enabled and manager.last:
+        manifest = verify(manager.last)
+        # A handoff with no new updates still belongs to its original namespace.
+        if manifest and manifest['experiment_id'] == manager.experiment:
+            manager.sync(manager.last)

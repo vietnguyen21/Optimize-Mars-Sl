@@ -84,9 +84,11 @@ class LayaScorer:
         self.max_length = int(meta.get('max_length', 512))
         if not math.isfinite(self.temperature) or self.temperature <= 0:
             raise ValueError('Invalid trained temperature')
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+        from src.training.hf_auth import model_hf_options
+        hf_options = model_hf_options(self.model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, **hf_options)
         self.model = AutoModelForSequenceClassification.from_pretrained(
-            self.model_path, attn_implementation='eager').to(self.device)
+            self.model_path, attn_implementation='eager', reference_compile=False, **hf_options).to(self.device)
         self.model.eval()
 
 

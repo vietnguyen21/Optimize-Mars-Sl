@@ -1,0 +1,2 @@
+-r kaggle-core.txt
+sentence-transformers==4.1.0
