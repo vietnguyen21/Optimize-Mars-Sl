@@ -96,5 +96,31 @@ class TestPipCheckFilter(unittest.TestCase):
         self.assertEqual(blocking, [self.IBIS])
 
 
+class TestImplicitForeignKeyColumn(unittest.TestCase):
+    def test_references_without_column_targets_primary_key(self):
+        from src.grounding.graph_builder import build_graph_from_sqlite
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "x.sqlite")
+            conn = sqlite3.connect(path)
+            conn.executescript("CREATE TABLE author (aid INTEGER PRIMARY KEY, name TEXT);"
+                               "CREATE TABLE book (bid INTEGER PRIMARY KEY, aid INTEGER REFERENCES author);")
+            conn.close()
+            graph = build_graph_from_sqlite(path, "x")
+            self.assertIn(("book", "aid", "author", "aid"), [f.as_tuple() for f in graph.foreign_keys])
+
+    def test_composite_key_order_and_table_case(self):
+        from src.grounding.graph_builder import build_graph_from_sqlite
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "y.sqlite")
+            conn = sqlite3.connect(path)
+            conn.executescript("CREATE TABLE customers (a INTEGER, b INTEGER, PRIMARY KEY (b, a));"
+                               "CREATE TABLE orders (id INTEGER PRIMARY KEY, cb INTEGER, ca INTEGER,"
+                               " FOREIGN KEY (cb, ca) REFERENCES Customers);")
+            conn.close()
+            edges = [f.as_tuple() for f in build_graph_from_sqlite(path, "y").foreign_keys]
+            self.assertIn(("orders", "cb", "customers", "b"), edges)
+            self.assertIn(("orders", "ca", "customers", "a"), edges)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -329,21 +329,28 @@ class SchemaGraphBuilder:
                 cols_info = cursor.fetchall()
 
                 cols = [c[1] for c in cols_info]
-                pks = [c[1] for c in cols_info if c[5] > 0]
+                # table_info's pk field is the 1-based position inside the primary key.
+                pks = [c[1] for c in sorted(cols_info, key=lambda c: c[5]) if c[5] > 0]
 
                 table_columns[tbl] = cols
                 table_pks[tbl] = pks
                 graph.add_table_node(table_name=tbl, columns=cols, primary_keys=pks, weight=1.0)
 
-            # 2. Extract explicit foreign keys
+            # 2. Extract explicit foreign keys. SQLite matches table names case-insensitively,
+            # and BIRD declares e.g. REFERENCES Customers for a table named customers.
+            canonical = {t.lower(): t for t in tables}
             for tbl in tables:
                 cursor.execute(f'PRAGMA foreign_key_list("{tbl}");')
                 fks = cursor.fetchall()
                 for fk in fks:
-                    to_table = fk[2]
+                    to_table = canonical.get(fk[2].lower(), fk[2])
                     from_col = fk[3]
                     to_col = fk[4]
-                    if to_table in tables:
+                    if to_col is None:
+                        # "REFERENCES t" without a column targets t's primary key (common in BIRD).
+                        target_pks = table_pks.get(to_table, [])
+                        to_col = target_pks[fk[1]] if fk[1] < len(target_pks) else None
+                    if to_table in tables and to_col is not None:
                         graph.add_fk_edge(
                             from_table=tbl,
                             from_col=from_col,

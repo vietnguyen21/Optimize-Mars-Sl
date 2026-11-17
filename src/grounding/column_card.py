@@ -67,7 +67,9 @@ class ColumnCardExtractor:
                     from_col = fk[3]
                     to_table = fk[2]
                     to_col = fk[4]
-                    fk_map[from_col] = f"FOREIGN KEY REFERENCES {to_table}({to_col})"
+                    # "REFERENCES t" without a column points at t's primary key; omit "(None)".
+                    fk_map[from_col] = (f"FOREIGN KEY REFERENCES {to_table}({to_col})" if to_col
+                                        else f"FOREIGN KEY REFERENCES {to_table}")
 
                 for col in cols:
                     col_name = col[1]
