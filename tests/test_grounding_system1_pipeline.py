@@ -70,12 +70,15 @@ class PipelineContracts(unittest.TestCase):
         self.assertEqual([r['label'] for r in rows],[1,0,0])
         self.assertTrue(all(r['label_source']=='execution_match' for r in rows))
 
-    def test_candidate_label_respects_order(self):
+    def test_candidate_label_uses_bird_rule(self):
+        # Labels follow the EX rule (set equality), so a different ORDER BY direction is still correct;
+        # a different result set is not.
         records=[dict(db_id='financial_mini',question='Client identifiers ascending',
             SQL='SELECT client_id FROM clients ORDER BY client_id ASC',
-            candidates=['SELECT client_id FROM clients ORDER BY client_id DESC'])]
+            candidates=['SELECT client_id FROM clients ORDER BY client_id DESC',
+                        'SELECT client_id FROM clients LIMIT 1'])]
         rows=decision.build_candidate_dataset(records,'data/mini')
-        self.assertEqual(rows[0]['label'],0)
+        self.assertEqual([r['label'] for r in rows],[1,0])
         self.assertIn('CREATE TABLE',rows[0]['schema'])
 
     def test_candidate_builder_rejects_fixture_generator(self):

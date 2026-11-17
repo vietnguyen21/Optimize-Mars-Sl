@@ -285,11 +285,12 @@ class TestMetricsComputation(unittest.TestCase):
         ok, _ = execute_query_safely("WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM t) SELECT sum(x) FROM t", self.db_path, timeout=0.01)
         self.assertFalse(ok)
 
-    def test_ordered_gold_preserves_row_order(self):
+    def test_row_order_ignored_like_bird(self):
+        # BIRD's official script compares set(pred) == set(gold), so ORDER BY direction does not count.
         ex, _ = compute_execution_accuracy(
             ["SELECT id FROM metrics_test ORDER BY id DESC"],
             ["SELECT id FROM metrics_test ORDER BY id ASC"], [self.db_path])
-        self.assertEqual(ex, 0.0)
+        self.assertEqual(ex, 100.0)
 
     def test_memory_footprint(self):
         mem = measure_memory_footprint()
