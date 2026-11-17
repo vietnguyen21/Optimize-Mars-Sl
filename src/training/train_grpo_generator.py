@@ -124,8 +124,7 @@ def compute_exec_reward(
         return 1.0
 
     from src.evaluation.metrics import compare_sql_results
-    if compare_sql_results(cand_rows, gold_rows,
-            preserve_order=bool(re.search(r"\bORDER\s+BY\b", gold_sql, re.I))):
+    if compare_sql_results(cand_rows, gold_rows):
         return 2.0
 
     return 1.0

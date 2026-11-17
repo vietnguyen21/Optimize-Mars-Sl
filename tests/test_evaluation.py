@@ -202,10 +202,10 @@ class TestMetricsComputation(unittest.TestCase):
         rows2 = [(1, "alpha"), (2, "beta")]
         self.assertTrue(compare_sql_results(rows1, rows2))
 
-        # Floating point rounding
-        rows_f1 = [(10.50004,)]
-        rows_f2 = [(10.50001,)]
-        self.assertTrue(compare_sql_results(rows_f1, rows_f2))
+        # BIRD official rule: raw set equality, no float rounding, duplicates and order ignored
+        self.assertFalse(compare_sql_results([(10.50004,)], [(10.50001,)]))
+        self.assertTrue(compare_sql_results([(1,), (1,)], [(1,)]))
+        self.assertTrue(compare_sql_results([(1,), (2,)], [(2,), (1,)]))
 
         # Distinct mismatch
         rows_diff = [(1, "alpha"), (3, "delta")]

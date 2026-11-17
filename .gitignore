@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+# Run outputs: never commit results without provenance
+reports/
+logs/
+colab_drive_mock/
+notebooks/runs/

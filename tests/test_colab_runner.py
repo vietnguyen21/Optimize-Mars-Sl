@@ -1,0 +1,82 @@
+"""Tests the BIRD split logic and the Colab runner's environment mapping (no BIRD, no GPU)."""
+
+import os
+import sqlite3
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from scripts.prepare_bird import build_splits, dedupe, split_by_db, split_cal
+from scripts.colab.run_stage import build_env, parse_overrides
+
+
+class TestSplits(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.records = []
+        for i in range(20):
+            db = f"db{i}"
+            conn = sqlite3.connect(os.path.join(self.tmp.name, f"{db}.sqlite"))
+            conn.execute('CREATE TABLE "Free Meal" (id INTEGER PRIMARY KEY, `Count (K-12)` REAL)')
+            conn.commit()
+            conn.close()
+            for q in range(5):
+                self.records.append({"db_id": db, "question": f"q{q} of {db}", "evidence": "", "SQL": "SELECT 1"})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_databases_never_cross_splits(self):
+        dev = [{"db_id": "devdb", "question": "d", "SQL": "SELECT 1"}]
+        files, meta = build_splits(dev, self.records, self.tmp.name)
+        dbs = {name: {r["db_id"] for r in rows} for name, rows in files.items()}
+        held = set(meta["cal_a_db_ids"]) | set(meta["cal_b_db_ids"])
+        self.assertEqual(len(held), 2)
+        self.assertFalse(dbs["train.jsonl"] & held)
+        self.assertFalse(dbs["retrieval_dev.jsonl"] & dbs["cal_b.jsonl"])
+        self.assertEqual(dbs["retrieval_dev.jsonl"], set(meta["cal_a_db_ids"]))
+        self.assertEqual(files["test.jsonl"], dev)
+
+    def test_sft_schema_is_verbatim_ddl_and_answer_is_sql(self):
+        files, _ = build_splits([], self.records, self.tmp.name)
+        row = files["sft_train.jsonl"][0]
+        self.assertIn('"Free Meal"', row["schema"])
+        self.assertIn("`Count (K-12)`", row["schema"])
+        self.assertEqual(row["answer"], "SELECT 1")
+        self.assertNotIn("SQL", row)
+
+    def test_same_split_as_earlier_runs(self):
+        a = split_by_db(self.records, seed=42)[2]
+        self.assertEqual(a, split_by_db(self.records, seed=42)[2])
+        cal_a, cal_b = split_cal(["a", "b", "c", "d", "e", "f", "g"])
+        self.assertEqual((len(cal_a), len(cal_b)), (4, 3))
+
+    def test_dedupe_by_normalized_question(self):
+        rows = [{"db_id": "x", "question": "How  many?"}, {"db_id": "x", "question": "how many?"},
+                {"db_id": "y", "question": "how many?"}]
+        kept, dropped = dedupe(rows)
+        self.assertEqual((len(kept), dropped), (2, 1))
+
+
+class TestRunnerEnv(unittest.TestCase):
+    def test_paths_and_resume(self):
+        env = build_env("grounding", "/d", "r1", {}, run_dir_has_checkpoint=False, base={})
+        self.assertEqual(env["KAGGLE_DATA_DIR"], "/d/data")
+        self.assertEqual(env["KAGGLE_OUTPUT_DIR"], "/d/runs/r1")
+        self.assertEqual(env["RESUME_FROM_CHECKPOINT"], "none")
+        self.assertEqual(env["CHECKPOINT_SYNC_ENABLED"], "0")
+        self.assertNotIn("GENERATOR_MODEL", env)
+        self.assertEqual(build_env("grounding", "/d", "r1", {}, True, base={})["RESUME_FROM_CHECKPOINT"], "latest")
+
+    def test_generator_default_and_overrides(self):
+        env = build_env("sft", "/d", "r", parse_overrides(["MAX_STEPS=50", "LAMBDA_JEPA=0"]), False, base={})
+        self.assertEqual(env["GENERATOR_MODEL"], "Qwen/Qwen2.5-Coder-3B-Instruct")
+        self.assertEqual((env["MAX_STEPS"], env["LAMBDA_JEPA"]), ("50", "0"))
+        with self.assertRaises(ValueError):
+            parse_overrides(["MAX_STEPS"])
+
+
+if __name__ == "__main__":
+    unittest.main()

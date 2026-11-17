@@ -411,8 +411,7 @@ def build_candidate_dataset(records, db_dir, output_path=None, generator=None, n
             sqls.append(gold)
         for sql in dict.fromkeys(sqls):
             success, rows = execute_query_safely(sql, db)
-            label = int(success and compare_sql_results(rows, gold_rows,
-                        preserve_order=bool(re.search(r'\bORDER\s+BY\b',gold,re.I))))
+            label = int(success and compare_sql_results(rows, gold_rows))
             result.append({'db_id':row['db_id'], 'question':row['question'],
                            'schema':schema,
                            'sql':sql, 'label':label, 'label_source':'execution_match'})

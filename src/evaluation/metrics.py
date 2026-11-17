@@ -1,7 +1,7 @@
 """
 Benchmark Metrics Computation Suite for Text-to-SQL SLM Architecture.
 Computes:
-1. Execution Accuracy (EX): Exact multiset match between generated and gold queries.
+1. Execution Accuracy (EX): BIRD official rule, set(pred_rows) == set(gold_rows), 30 s per query.
 2. Valid SQL Rate (VSR): Percentage of queries executing with 0 syntax/runtime errors.
 3. Expected Calibration Error (ECE): 10-bin calibration error of confidence predictions.
 4. Latency Statistics: Mean, median, P95, P99 in milliseconds.
@@ -60,17 +60,15 @@ def normalize_query_result(rows: Any, preserve_order: bool = False) -> Any:
         return normalized
 
 
-def compare_sql_results(res1: Any, res2: Any, preserve_order: bool = False) -> bool:
+def compare_sql_results(res1: Any, res2: Any) -> bool:
     """
-    Compares two query result sets for equivalence.
-    Returns True if sets match after normalization.
+    BIRD official equivalence: set(res1) == set(res2) on raw rows. Row order, duplicates,
+    ORDER BY and float precision are not normalized, matching BIRD's evaluation script.
     """
-    norm1 = normalize_query_result(res1, preserve_order)
-    norm2 = normalize_query_result(res2, preserve_order)
-    return norm1 == norm2
+    return set(res1 or []) == set(res2 or [])
 
 
-def execute_query_safely(sql: str, db_path: str, timeout: float = 3.0) -> Tuple[bool, Any]:
+def execute_query_safely(sql: str, db_path: str, timeout: float = 30.0) -> Tuple[bool, Any]:
     """
     Executes SQL query on SQLite database and returns (success: bool, rows_or_error: Any).
     """
@@ -120,7 +118,7 @@ def compute_execution_accuracy(
         p_ok, p_res = execute_query_safely(pred_sql, db_path)
         g_ok, g_res = execute_query_safely(gold_sql, db_path)
 
-        if p_ok and g_ok and compare_sql_results(p_res, g_res, preserve_order=bool(re.search(r"\bORDER\s+BY\b", gold_sql, re.I))):
+        if p_ok and g_ok and compare_sql_results(p_res, g_res):
             matches.append(True)
         else:
             matches.append(False)
