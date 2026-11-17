@@ -39,6 +39,22 @@ class KagglePaths:
         return str(p)
 
 
+# Preinstalled image packages the project never imports. A pip check line is ignored only when one of
+# these is the package making the complaint, so a conflict involving a project package still fails.
+PIP_CHECK_IGNORED_REQUIRERS = frozenset({'ibis-framework', 'ipython'})
+
+
+def pip_check_problems(output, profile_packages=()):
+    """Splits pip check output into (blocking, ignored) lines."""
+    ignored_names = PIP_CHECK_IGNORED_REQUIRERS - {name.lower() for name in profile_packages}
+    blocking, ignored = [], []
+    for line in output.splitlines():
+        if not line.strip() or line.startswith('No broken requirements'):
+            continue
+        (ignored if line.split()[0].lower() in ignored_names else blocking).append(line)
+    return blocking, ignored
+
+
 def install_dependencies(repo_dir, stage='evaluation'):
     """Constrain the image CUDA stack; never reinstall it implicitly."""
     if os.environ.get('PIPELINE_MODE', 'train').lower() == 'smoke':
@@ -89,8 +105,13 @@ def install_dependencies(repo_dir, stage='evaluation'):
         subprocess.check_call(command)
     if cuda_stack() != before:
         raise RuntimeError('CUDA stack changed unexpectedly; stop and restart with the original image')
-    subprocess.check_call([sys.executable, '-m', 'pip', 'check'])
-    snapshot = {'python': sys.version, 'protected_cuda_stack': before, 'profile': profile.name,
+    check = subprocess.run([sys.executable, '-m', 'pip', 'check'], capture_output=True, text=True)
+    blocking, ignored = pip_check_problems(check.stdout + check.stderr, requirements(profile))
+    if check.returncode and (blocking or not ignored):
+        raise RuntimeError('pip check failed:
+' + '
+'.join(blocking or [check.stdout + check.stderr]))
+    snapshot = {'python': sys.version, 'pip_check_ignored': ignored, 'protected_cuda_stack': before, 'profile': profile.name,
                 'effective_requirements': {name: str(req.specifier) for name, req in requirements(profile).items()},
                 'resolved_install': [{'name': entry['metadata']['name'], 'version': entry['metadata']['version']} for entry in plan.get('install', [])],
                 'installed_packages': {d.metadata['Name']: d.version for d in importlib.metadata.distributions() if d.metadata['Name']}}

@@ -78,5 +78,26 @@ class TestRunnerEnv(unittest.TestCase):
             parse_overrides(["MAX_STEPS"])
 
 
+class TestPipCheckFilter(unittest.TestCase):
+    IBIS = "ibis-framework 9.5.0 has requirement sqlglot<25.21,>=23.4, but you have sqlglot 26.16.4."
+    PEFT = "peft 0.15.2 has requirement transformers>=4.99, but you have transformers 4.51.3."
+
+    def test_only_listed_requirers_are_ignored(self):
+        from src.training.kaggle import pip_check_problems
+        blocking, ignored = pip_check_problems(self.IBIS + "
+ipython 7.34.0 requires jedi, which is not installed.
+")
+        self.assertEqual(blocking, [])
+        self.assertEqual(len(ignored), 2)
+        blocking, _ = pip_check_problems(self.IBIS + "
+" + self.PEFT)
+        self.assertEqual(blocking, [self.PEFT])
+
+    def test_never_ignores_a_project_package(self):
+        from src.training.kaggle import pip_check_problems
+        blocking, _ = pip_check_problems(self.IBIS, profile_packages=["ibis-framework"])
+        self.assertEqual(blocking, [self.IBIS])
+
+
 if __name__ == "__main__":
     unittest.main()
