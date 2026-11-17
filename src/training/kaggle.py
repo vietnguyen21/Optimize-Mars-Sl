@@ -108,9 +108,7 @@ def install_dependencies(repo_dir, stage='evaluation'):
     check = subprocess.run([sys.executable, '-m', 'pip', 'check'], capture_output=True, text=True)
     blocking, ignored = pip_check_problems(check.stdout + check.stderr, requirements(profile))
     if check.returncode and (blocking or not ignored):
-        raise RuntimeError('pip check failed:
-' + '
-'.join(blocking or [check.stdout + check.stderr]))
+        raise RuntimeError('pip check failed:\n' + '\n'.join(blocking or [check.stdout + check.stderr]))
     snapshot = {'python': sys.version, 'pip_check_ignored': ignored, 'protected_cuda_stack': before, 'profile': profile.name,
                 'effective_requirements': {name: str(req.specifier) for name, req in requirements(profile).items()},
                 'resolved_install': [{'name': entry['metadata']['name'], 'version': entry['metadata']['version']} for entry in plan.get('install', [])],

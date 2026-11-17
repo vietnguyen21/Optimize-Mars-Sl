@@ -84,13 +84,10 @@ class TestPipCheckFilter(unittest.TestCase):
 
     def test_only_listed_requirers_are_ignored(self):
         from src.training.kaggle import pip_check_problems
-        blocking, ignored = pip_check_problems(self.IBIS + "
-ipython 7.34.0 requires jedi, which is not installed.
-")
+        blocking, ignored = pip_check_problems(self.IBIS + "\nipython 7.34.0 requires jedi, which is not installed.\n")
         self.assertEqual(blocking, [])
         self.assertEqual(len(ignored), 2)
-        blocking, _ = pip_check_problems(self.IBIS + "
-" + self.PEFT)
+        blocking, _ = pip_check_problems(self.IBIS + "\n" + self.PEFT)
         self.assertEqual(blocking, [self.PEFT])
 
     def test_never_ignores_a_project_package(self):
