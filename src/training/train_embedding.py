@@ -278,6 +278,7 @@ def run_dry_run(
 
 
 from src.training.embedding_sampling import EmbeddingSampler, SAMPLING_STRATEGIES, validate_embedding_extra
+from src.training.embedding_validation import EVALUATION_KINDS, isolated_validation, validation_contract
 
 
 def parse_args():
@@ -297,6 +298,10 @@ def parse_args():
     parser.add_argument("--sampling_strategy", choices=SAMPLING_STRATEGIES, default="sequential")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
+    parser.add_argument("--global_max_steps", type=int)
+    parser.add_argument("--session_stop_step", type=int)
+    parser.add_argument("--eval_steps", type=int, default=0)
+    parser.add_argument("--evaluation_kind", choices=EVALUATION_KINDS)
     return parser.parse_args()
 
 
@@ -428,22 +433,44 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
                            db_dir=None, eval_path=None, dry_run=False, margin=0.1, temperature=0.05,
                            max_steps=100, max_length=256, learning_rate=2e-5, gradient_accumulation_steps=8,
                            save_steps=50, seed=42, device='cuda:0', resume_from_checkpoint=None, hard_negatives=4,
-                           sampling_strategy='sequential', **kwargs):
+                           sampling_strategy='sequential', global_max_steps=None, session_stop_step=None,
+                           eval_steps=0, evaluation_kind=None, **kwargs):
     """Fine-tune a real SentenceTransformer with differentiable HN-SupCon.
 
     One query/positive at a time, FP16 AMP and checkpointing fit the initial
     single-T4 target. max_steps counts optimizer updates, not microbatches.
+    Opt-in global_max_steps pins a full-run target; session_stop_step is an
+    absolute temporary boundary. Periodic validation is off unless eval_steps>0.
     """
     if sampling_strategy not in SAMPLING_STRATEGIES:
         raise ValueError("Unknown embedding sampling strategy")
     if dry_run:
         return dict(run_dry_run(cards_path, bird_path, output_dir), mode='smoke', trained=False)
+    session_mode = global_max_steps is not None
+    if not session_mode and session_stop_step is not None:
+        raise ValueError('session_stop_step requires a fixed global_max_steps')
+    target = global_max_steps if session_mode else max_steps
+    stop = session_stop_step if session_stop_step is not None else target
+    if target < 1 or not 1 <= stop <= target:
+        raise ValueError('Require 1 <= session_stop_step <= global_max_steps (or positive legacy max_steps)')
+    validation = validation_contract(eval_steps, eval_path, evaluation_kind, session_mode=session_mode)
+    from src.training.checkpoint_sync import ACTIVE_SYNC, finalize_checkpoint_backup
+    if session_mode:
+        sync = ACTIVE_SYNC.get()
+        if sync is None or not sync.enabled or sync.read_only:
+            raise ValueError('Session training requires enabled writable HF checkpoint sync')
     if not TORCH_AVAILABLE:
         raise ImportError('Real embedding training requires torch and sentence-transformers; no dry-run fallback')
     from sentence_transformers import SentenceTransformer
     from pathlib import Path
-    if (Path(output_dir)/'final').exists():
+    final_path = Path(output_dir) / 'final'
+    export_claim = Path(output_dir) / '.final-export.claim'
+    final_artifacts = [final_path, export_claim] + [Path(output_dir) / name for name in
+        ('offline_column_index.npy', 'offline_column_index.json', 'column_index_meta.json', 'training_summary.json')]
+    if any(p.exists() or p.is_symlink() for p in final_artifacts):
         raise FileExistsError('Embedding final artifact exists; choose a fresh output directory to preserve weights')
+    if session_mode and not resume_from_checkpoint and any(Path(output_dir).glob('checkpoint-[0-9]*')):
+        raise ValueError('Local checkpoints exist; explicitly resume a compatible checkpoint or use a fresh output root')
     from src.training.runtime import seed_everything, load_records, dataset_fingerprint
     seed_everything(seed)
     cards = load_records(cards_path)
@@ -461,7 +488,7 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
         if any(question_key(r) in train_keys for r in heldout):
             raise ValueError('Retrieval evaluation questions overlap training questions')
         evaluation_examples = build_embedding_examples(cards,heldout,db_dir,label_mode=label_mode)
-    if max_steps < 1 or gradient_accumulation_steps < 1 or hard_negatives < 1 or save_steps < 1:
+    if (not session_mode and max_steps < 1) or gradient_accumulation_steps < 1 or hard_negatives < 1 or save_steps < 1:
         raise ValueError('max_steps, gradient_accumulation_steps and hard_negatives must be positive')
     from src.training.model_identity import model_identity, read_identity, verify_identity
     expected_identity = read_identity(resume_from_checkpoint) if resume_from_checkpoint else None
@@ -485,8 +512,16 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
         sampling_strategy=sampling_strategy,sampling_version=1)
     if label_mode != 'legacy':
         contract['grounding_label_mode'] = label_mode
+    if session_mode:
+        contract.update(training_plan_version=1, global_max_steps=global_max_steps)
+    if validation is not None:
+        contract['validation'] = validation
     log = ExperimentLogger(output_dir,contract)
     step = 0
+    checkpoint_step = None
+    checkpoint_path = None
+    last_evaluation_step = 0
+    last_validation = None
     if resume_from_checkpoint:
         path = latest_checkpoint(output_dir) if resume_from_checkpoint == 'latest' else resume_from_checkpoint
         if path is None:
@@ -494,6 +529,53 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
         state = load_checkpoint(path, model, optimizer, scaler=scaler, expected_extra={"contract": contract},
                                 extra_validator=validate_embedding_extra)
         step = state['step']
+        checkpoint_step, checkpoint_path = step, path
+        progress = state.get('extra', {}).get('validation_progress', {})
+        last_evaluation_step = progress.get('last_evaluation_step', 0)
+        last_validation = progress.get('last_validation')
+    if step > stop:
+        raise ValueError('Resume step exceeds this session stop; choose a later absolute boundary')
+    log.log(event='training_session', step=step, session_stop_step=stop,
+            global_max_steps=target if session_mode else None, evaluation_kind=evaluation_kind)
+
+    def checkpoint_current():
+        nonlocal checkpoint_step, checkpoint_path
+        if checkpoint_step != step:
+            extra = {'phase': 'embedding', 'contract': contract}
+            if eval_steps:
+                extra['validation_progress'] = dict(last_evaluation_step=last_evaluation_step,
+                                                    last_validation=last_validation)
+            checkpoint_path = save_checkpoint(output_dir, model, optimizer, step, scaler=scaler, extra=extra)
+            checkpoint_step = step
+        if session_mode:
+            finalize_checkpoint_backup(require_verified=True)
+
+    def periodic_validation(*, retry_failed_final=False):
+        nonlocal last_evaluation_step, last_validation
+        retry_final = (retry_failed_final and step == target and last_validation is not None
+                       and last_validation.get('status') == 'failed')
+        if (not eval_steps or not step or (step <= last_evaluation_step and not retry_final)
+                or (step % eval_steps and step != target)):
+            return False
+        event = dict(event='retrieval_validation', phase='embedding', step=step,
+                     evaluation_kind=evaluation_kind, eval_sha256=validation['eval_sha256'], k=10)
+        try:
+            with isolated_validation(model):
+                metrics, _ = evaluate_retrieval(model, cards, evaluation_examples, top_k=10)
+            if metrics['k'] != 10 or not all(math.isfinite(metrics[key]) and 0 <= metrics[key] <= 1
+                                            for key in ('recall_at_k', 'hit_at_k')):
+                raise ValueError('Invalid Recall@10/Hit@10 validation metrics')
+            event.update(status='ok', recall_at_10=metrics['recall_at_k'],
+                         hit_at_10=metrics['hit_at_k'], questions=metrics['questions'])
+        except Exception as exc:
+            event.update(status='failed', error=type(exc).__name__)
+            last_evaluation_step, last_validation = step, event
+            log.log(event)
+            checkpoint_current()  # Preserve the completed update even on validation failure.
+            raise
+        last_evaluation_step, last_validation = step, event
+        log.log(event)
+        return True
     sampler = EmbeddingSampler(len(examples), seed, sampling_strategy)
     texts = [format_column_card_text(c) for c in cards]
     model.train()
@@ -502,7 +584,10 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
     max_skips = int(os.environ.get('AMP_MAX_CONSECUTIVE_SKIPS', '8'))
     if max_skips < 1:
         raise ValueError('AMP_MAX_CONSECUTIVE_SKIPS must be positive')
-    while step < max_steps:
+    # A normal resumed checkpoint already carries the validation watermark.
+    if periodic_validation(retry_failed_final=True):
+        checkpoint_current()
+    while step < stop:
         sum_loss = 0.0
         for micro in range(gradient_accumulation_steps):
             index = sampler.index(step * gradient_accumulation_steps + micro)
@@ -540,21 +625,49 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
         consecutive_skips = 0
         step += 1
         log.log(step=step, loss=sum_loss/gradient_accumulation_steps, phase='embedding')
-        if step % save_steps == 0 or step == max_steps:
-            save_checkpoint(output_dir, model, optimizer, step, tokenizer=None, scaler=scaler,
-                            extra={'phase':'embedding','contract':contract})
-    from src.training.checkpoint_sync import finalize_checkpoint_backup
-    finalize_checkpoint_backup()
-    model.eval()
-    model.save(os.path.join(output_dir,'final'))
+        evaluated = periodic_validation()
+        if step % save_steps == 0 or step == stop or evaluated:
+            checkpoint_current()
+    checkpoint_current()  # Reuse the loaded/saved step rather than create checkpoint-N twice.
+    if session_mode and step < target:
+        result = dict(mode='train', trained=True, status='session_stopped', step=step,
+                      global_max_steps=target, checkpoint_path=str(checkpoint_path),
+                      model_path=None, index=None, retrieval=last_validation)
+        log.log(event='session_stopped', step=step, global_max_steps=target)
+        with open(os.path.join(output_dir, 'session_summary.json'), 'w') as f:
+            json.dump(result, f, indent=2)
+        return result
+    if not session_mode:
+        finalize_checkpoint_backup()
+    from src.training.environment import check_checkpoint_disk
+    from src.training.runtime import checkpoint_size_estimate
+    # Also check target-only export resumes, which do not create a new checkpoint.
+    check_checkpoint_disk(output_dir, None, 0, checkpoint_size_estimate(model))
     metrics = None
-    if eval_path:
-        metrics, vectors = evaluate_retrieval(model, cards, evaluation_examples)
-    else:
-        vectors = model.encode(texts, batch_size=4, normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False)
+    if eval_steps:
+        if last_validation is None or last_validation.get('status') != 'ok':
+            raise RuntimeError('Final validation is not successful; completed checkpoint preserved')
+        metrics = dict(recall_at_k=last_validation['recall_at_10'], hit_at_k=last_validation['hit_at_10'],
+                       k=10, questions=last_validation['questions'])
+    elif eval_path:
+        with isolated_validation(model):
+            metrics, _ = evaluate_retrieval(model, cards, evaluation_examples)
+    model.eval()
+    # Keep the claim even on export failure; retry into a fresh output root.
+    # Native save APIs retain responsibility for creating their output directory.
+    with export_claim.open('x') as handle:
+        json.dump(dict(step=step, global_max_steps=target), handle)
+    if any(p.exists() or p.is_symlink() for p in final_artifacts if p != export_claim):
+        raise FileExistsError('Embedding final artifact appeared before export')
+    model.save(str(final_path))
+    vectors = model.encode(texts, batch_size=4, normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False)
     index = export_column_index(vectors, cards, output_dir)
     result = {'mode':'train','trained':True,'step':step,'model_path':os.path.join(output_dir,'final'),
               'index':index,'retrieval':metrics,'evaluation_status':'held_out' if eval_path else 'not_requested'}
+    if session_mode:
+        result.update(status='completed', global_max_steps=target)
+    if evaluation_kind is not None:
+        result['evaluation_kind'] = evaluation_kind
     with open(os.path.join(output_dir,'training_summary.json'),'w') as f:
         json.dump(result,f,indent=2)
     return result

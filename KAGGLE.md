@@ -450,6 +450,8 @@ Remote path là `checkpoints/<experiment-id>/<stage>/checkpoint-N/`. `owner.json
 
 ### 4. Bắt đầu mới và resume trong phiên khác
 
+Notebook 01 hỗ trợ opt-in `GLOBAL_MAX_STEPS`, `SESSION_STOP_STEP`, `EVAL_STEPS` và `EVALUATION_KIND` cho session tạm dừng/validation định kỳ. Global target cố định; boundary là optimizer step tuyệt đối. Session tạm dừng chỉ trả thành công sau backup đã xác minh và không export `final/`. Xem [session contract, validation metrics và disk planning](docs/EMBEDDING_SESSIONS.md). Mặc định vẫn dùng `MAX_STEPS` legacy và không validation định kỳ; các giá trị full-training đề xuất chưa phải cấu hình thí nghiệm đã duyệt.
+
 | Giá trị `CHECKPOINT_RESUME_SOURCE` | Hành vi |
 |---|---|
 | `none` | Chạy mới; chọn ID và output mới để không va checkpoint cũ |

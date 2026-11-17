@@ -480,7 +480,7 @@ def persistent_training(stage):
             if values.get('dry_run'):
                 return fn(*args, **kwargs)
             output = values.get('output_dir') or f'/kaggle/working/{stage}'
-            excluded = {'output_dir', 'export_dir', 'drive_dir', 'resume_from_checkpoint', 'resume', 'max_steps', 'epochs', 'num_epochs', 'save_steps', 'device', 'model', 'tokenizer', 'sft_checkpoint', 'adapter_path', 'dry_run', 'eval_path'}
+            excluded = {'output_dir', 'export_dir', 'drive_dir', 'resume_from_checkpoint', 'resume', 'max_steps', 'epochs', 'num_epochs', 'save_steps', 'device', 'model', 'tokenizer', 'sft_checkpoint', 'adapter_path', 'dry_run', 'eval_path', 'session_stop_step'}
             legacy_contract = {}
             for key, value in values.items():
                 if key in excluded:
@@ -492,6 +492,19 @@ def persistent_training(stage):
                 legacy_contract[key] = value
             effective = dict(legacy_contract)
             if stage == 'grounding':
+                # New opt-in controls must not change legacy default fingerprints.
+                for key in ('global_max_steps', 'eval_steps', 'evaluation_kind'):
+                    if not effective.get(key):
+                        effective.pop(key, None)
+                        legacy_contract.pop(key, None)
+                from src.training.embedding_validation import validation_contract
+                validation = validation_contract(values.get('eval_steps', 0), values.get('eval_path'),
+                    values.get('evaluation_kind'), session_mode=values.get('global_max_steps') is not None)
+                if values.get('global_max_steps') is not None:
+                    effective['training_plan_version'] = legacy_contract['training_plan_version'] = 1
+                if validation is not None:
+                    effective['validation'] = validation
+                    legacy_contract['validation'] = validation
                 strategy = effective.get('sampling_strategy', 'sequential')
                 if strategy not in ('sequential', 'epoch_shuffle_v1'):
                     raise ValueError('Unknown embedding sampling strategy')
@@ -559,10 +572,22 @@ def download_checkpoint_artifact(output_dir, stage):
     raise FileNotFoundError('No verified remote artifact available')
 
 
-def finalize_checkpoint_backup():
+def finalize_checkpoint_backup(*, require_verified=False):
     manager = ACTIVE_SYNC.get()
     if manager is not None and manager.enabled and manager.last:
         manifest = verify(manager.last)
         # A handoff with no new updates still belongs to its original namespace.
-        if manifest and manifest['experiment_id'] == manager.experiment:
-            manager.sync(manager.last)
+        if manifest and manifest['experiment_id'] == manager.experiment and manifest['stage'] == manager.stage:
+            if require_verified:
+                if not manager.compatible(manifest):
+                    raise SyncError('Session checkpoint configuration differs from active experiment')
+                # A save may already have verified this immutable payload. A new
+                # invocation has an empty cache and must verify the backup again.
+                key = (str(Path(manager.last).resolve()), fingerprint(manifest))
+                if key in manager.verified_uploads:
+                    return True
+            success = manager.sync(manager.last)
+            if success or not require_verified:
+                return success
+    if require_verified:
+        raise SyncError('Session checkpoint remote backup is not verified; local checkpoint preserved, refusing continuation')
