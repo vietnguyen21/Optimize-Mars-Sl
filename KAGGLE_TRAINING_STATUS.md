@@ -1,6 +1,32 @@
 # Kaggle training status — Optimize-Mars-Sl
 
-Status updated: 2026-11-13 (Notebook 01 Python compatibility); earlier training evidence recorded 2026-11-06. This report describes the current local implementation and the validation logs retained in this repository. It does not certify a successful Kaggle run.
+Status updated: 2026-11-14 (B2.7 grounding labels audit); earlier training evidence recorded 2026-11-06. This report describes the current local implementation and the validation logs retained in this repository. It does not certify a successful Kaggle run.
+
+## B2.7 — SQL grounding labels và strict full-data preparation — 2026-11-14
+
+**Đã implement và CPU-validated; full BIRD audit sau sửa: NOT EXECUTED.** Repo chỉ có mini BIRD 24 records/2 DB, không có raw BIRD Train 9.428 records/69 DB. Baseline 9.042 jointly-valid, 36 parser-failed/SQLite-valid và duplicate stats do người dùng cung cấp là code cũ; không dùng làm kết quả sau B2.7. Pilot T4 checkpoint-2 → session mới → checkpoint-3 là bằng chứng người dùng báo đã xác minh; lượt này không chạy lại GPU/Hub/training.
+
+- Resolver mới `scope_v2`: qualify với schema SQLite, inference/partial qualification tắt; scope-local walk; CTE/derived output validation; correlated parent lookup; literals và COUNT(*) không thành positives; ambiguous/unknown/stale cards/annotations → review.
+- CLI `scripts/audit_grounding_labels.py`: read-only URI/query_only/deny-write authorizer + EXPLAIN QUERY PLAN, giữ source index/record, hashes/version/DB breakdown và legacy comparison; SQLite-invalid luôn quarantine.
+- Duplicate guard NFKC/casefold/whitespace theo (db_id, question), deterministic group split; loại mọi conflicting SQL group, không chọn một gold; internal BIRD Train validation, không official dev/test.
+- Notebook 01 full preparation opt-in, mặc định không train hoặc khởi tạo checkpoint writer; pilot runner giữ nguyên legacy builder và contract mặc định. Strict mode thêm label-mode metadata vào contract, dùng experiment/files mới. Không sửa runtime/checkpoint_sync/requirements/HN-SupCon/model selection.
+
+| Validation local mới | Kết quả |
+|---|---|
+| Native CPU full suite | **295 passed**, 0 skips/failures/errors; 7.562s |
+| System Python full suite | 295 tests: **237 passed, 58 dependency-required skips**, 0 failures/errors; 1.360s |
+| Tests B2.7 mới trong suite | 34 tests, gồm exact labels A/B/C, scopes/CTE/correlation/stars/literals, SQLite quarantine, annotations/cards, group splits, no-training/no-HF notebook preparation và normalized eval overlap |
+| Smoke suites | **6/6 passed**; 0.952s |
+| Syntax/schema | 59 Python files và cả 5 notebooks schema/code syntax passed |
+| Mini CLI audit + strict reload | **24 compile PASS, 24 labels PASS, 24 valid**, recovered 0, quarantine/manual 0; internal split **21 train / 3 validation**, cả hai load bằng strict builder |
+| Preservation check | AST legacy builder/HN-SupCon không đổi; runtime/checkpoint_sync/core+grounding pins byte-identical với HEAD |
+| `git diff --check` | Passed |
+
+Artifacts mini được tạo ở `/tmp/b27-mini-x55sta2z/cli-audit` với cards có db_id được tạo từ SQLite schema trong `/tmp`, không sửa mini dataset/cards/DB của repo. Logs: `/tmp/b27-native.log`, `/tmp/b27-system.log`, `/tmp/b27-smoke.log`, `/tmp/b27-mini-cli.log`. Native environment là CPU/Python local, không phải acceptance Kaggle. Không training/full dataset audit, model download, checkpoint upload/delete, commit hoặc push.
+
+Files: `src/training/sql_grounding.py` (mới), `src/training/grounding_audit.py` (mới), `scripts/audit_grounding_labels.py` (mới), `tests/test_sql_grounding_audit.py` (mới), `src/training/train_embedding.py`, Notebook 01, `docs/B27_GROUNDING_AUDIT.md` (mới), `KAGGLE.md`, status này. Hướng dẫn cập nhật Kaggle source Dataset, exact full-audit cell, outputs, limitations và full-training PASS/FAIL gates: [docs/B27_GROUNDING_AUDIT.md](docs/B27_GROUNDING_AUDIT.md).
+
+Giới hạn: NATURAL JOIN implicit evidence và các construct không chứng minh được vẫn manual; COUNT(*)-only không tạo labels; strict cần tagged cards thật đầy đủ cho SQL evidence. SQL variants so exact stripped SQL có thể flag hai SQL tương đương; không tự merge. SQLite versions/extensions có thể ảnh hưởng compile. Cần full audit thật và review các source indices cũ trước khi kết luận phục hồi bao nhiêu trong 36 records.
 
 ## Notebook 01 Python compatibility fix — 2026-11-13
 

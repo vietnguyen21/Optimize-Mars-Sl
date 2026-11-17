@@ -313,7 +313,21 @@ def main():
 
 
 
-def build_embedding_examples(cards, records, db_dir=None):
+def build_embedding_examples(cards, records, db_dir=None, *, label_mode='scope_v2'):
+    """Schema-backed labels; strict also requires read-only SQLite compile PASS.
+
+    The training runner retains legacy by default for existing pilot checkpoints.
+    Full-dataset preparation must explicitly choose strict and a fresh experiment.
+    """
+    if label_mode == 'legacy':
+        return _build_legacy_embedding_examples(cards, records, db_dir)
+    if label_mode not in ('scope_v2','strict'):
+        raise ValueError('Unknown grounding label mode')
+    from src.training.sql_grounding import build_scope_examples
+    return build_scope_examples(cards, records, db_dir, strict=label_mode=='strict')
+
+
+def _build_legacy_embedding_examples(cards, records, db_dir=None):
     """Resolve SQL columns with SQLite ASTs; negatives stay inside the same DB.
 
     Prefer explicit ``positive_columns: [table.column, ...]`` annotations. Cards
@@ -434,14 +448,19 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
     seed_everything(seed)
     cards = load_records(cards_path)
     records = load_records(bird_path)
-    examples = build_embedding_examples(cards, records, db_dir)
+    label_mode = kwargs.get('grounding_label_mode', 'legacy')
+    if label_mode == 'strict':
+        from src.training.grounding_audit import assert_no_conflicting_gold
+        assert_no_conflicting_gold(records)
+    examples = build_embedding_examples(cards, records, db_dir, label_mode=label_mode)
     evaluation_examples = None
     if eval_path:
         heldout = load_records(eval_path)
-        train_keys = {(r['db_id'],r['question']) for r in records}
-        if any((r['db_id'],r['question']) in train_keys for r in heldout):
+        from src.training.grounding_audit import question_key
+        train_keys = {question_key(r) for r in records}
+        if any(question_key(r) in train_keys for r in heldout):
             raise ValueError('Retrieval evaluation questions overlap training questions')
-        evaluation_examples = build_embedding_examples(cards,heldout,db_dir)
+        evaluation_examples = build_embedding_examples(cards,heldout,db_dir,label_mode=label_mode)
     if max_steps < 1 or gradient_accumulation_steps < 1 or hard_negatives < 1 or save_steps < 1:
         raise ValueError('max_steps, gradient_accumulation_steps and hard_negatives must be positive')
     from src.training.model_identity import model_identity, read_identity, verify_identity
@@ -464,6 +483,8 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
         seed=seed,max_length=max_length,gradient_accumulation_steps=gradient_accumulation_steps,
         learning_rate=learning_rate,margin=margin,temperature=temperature,hard_negatives=hard_negatives,
         sampling_strategy=sampling_strategy,sampling_version=1)
+    if label_mode != 'legacy':
+        contract['grounding_label_mode'] = label_mode
     log = ExperimentLogger(output_dir,contract)
     step = 0
     if resume_from_checkpoint:

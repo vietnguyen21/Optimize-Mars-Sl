@@ -66,6 +66,10 @@ subprocess.run([sys.executable, str(REPO_DIR/'scripts/check_kaggle_environment.p
 
 `REPO_DIR` là thư mục source đã attach. CUDA build/driver, kiến trúc GPU và kernel forward/backward vẫn phải pass trên T4/P100 thật; Python/wheel tương thích không bảo đảm CUDA tương thích. Đặc biệt image torch mới có thể không chứa kernels cho P100. Không nâng Python trong phiên resume cũ: dùng lại môi trường và snapshot gốc.
 
+## B2.7 — Audit SQL grounding trước full Notebook 01
+
+Dùng [docs/B27_GROUNDING_AUDIT.md](docs/B27_GROUNDING_AUDIT.md) cho CLI read-only, artifacts, strict filtering, duplicate/conflicting gold guard, internal BIRD Train split và cell chạy full audit trên Kaggle. `GROUNDING_FULL_DATASET=1` mặc định **chỉ chuẩn bị dữ liệu**, không training; pilot/resume giữ legacy labels. Không dùng checkpoint pilot để resume dataset/resolver strict mới. Full BIRD sau B2.7 chưa được audit trong local workspace.
+
 ## Workflow acceptance GPU/HF được chuẩn bị
 
 Dùng [KAGGLE_GPU_ACCEPTANCE.md](KAGGLE_GPU_ACCEPTANCE.md) cho script và lệnh T4/P100, optional private Hub round-trip, hai session A/B, expected state/cursor/hash và pass/fail gates. Tool `scripts/run_kaggle_acceptance.py` mặc định không install hoặc upload; `--hub-upload` mới cho ghi fixture <5 MiB trong `acceptance-<UUID>` riêng. Không dùng checkpoint fixture cho research training.
