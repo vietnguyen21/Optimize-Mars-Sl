@@ -74,6 +74,8 @@ def validate_manifest(m):
 
 def verify(path, manifest=None):
     path = Path(path)
+    if path.is_symlink():
+        raise ValueError('Checkpoint symlinks are not supported')
     manifest_path = path / MANIFEST
     if manifest is not None:
         m = validate_manifest(manifest)
@@ -99,6 +101,9 @@ class CheckpointSync:
             raise ValueError('Invalid checkpoint stage')
         self.stage, self.compatibility = stage, compatibility
         self.enabled = os.environ.get('CHECKPOINT_SYNC_ENABLED', '0') == '1'
+        self.local_keep = int(os.environ.get('CHECKPOINT_LOCAL_KEEP', '0'))
+        if self.local_keep < 0 or (self.local_keep and not self.enabled):
+            raise ValueError('CHECKPOINT_LOCAL_KEEP must be 0 (disabled) or >=1 with writable HF sync enabled')
         self.experiment = os.environ.get('CHECKPOINT_EXPERIMENT_ID', '')
         self.repo = os.environ.get('CHECKPOINT_HF_REPO_ID', '')
         self.policy = os.environ.get('CHECKPOINT_SYNC_FAILURE_POLICY', 'warn')
@@ -115,12 +120,17 @@ class CheckpointSync:
         self.cache_dir = None
         self.verified_uploads = set()
         self.prefix = f'checkpoints/{self.experiment}/{stage}'
+        self.retention = None
         if self.enabled:
             self.output.mkdir(parents=True, exist_ok=True)
             if os.environ.get('CHECKPOINT_SYNC_BACKEND', 'hf_hub') != 'hf_hub':
                 raise ValueError('Only hf_hub checkpoint backend is supported')
             if not re.fullmatch(r'[\w.-]+/[\w.-]+', self.repo) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', self.experiment):
                 raise ValueError('Set CHECKPOINT_HF_REPO_ID and a unique CHECKPOINT_EXPERIMENT_ID')
+            if self.local_keep and not self.read_only:
+                from src.training.checkpoint_retention import LocalCheckpointRetention
+                self.retention = LocalCheckpointRetention(self.output, self.local_keep,
+                    self.experiment, self.stage, self.compatible)
             if api is None:
                 from huggingface_hub import HfApi, hf_hub_download
                 from src.training.hf_auth import hf_token
@@ -216,7 +226,7 @@ class CheckpointSync:
             # Cache only successful verified transfers in this invocation.
             m = verify(path)
             key = (str(Path(path).resolve()), fingerprint(m))
-            if key in self.verified_uploads:
+            if key in self.verified_uploads and self.retention is None:
                 self._event(success=True, step=m['step'], bytes=0, skipped=True,
                             duration_seconds=time.monotonic() - started)
                 return True
@@ -224,10 +234,24 @@ class CheckpointSync:
             self.verified_uploads.add(key)
             self._event(success=True, step=result['step'], bytes=result['bytes'],
                         skipped=result['skipped'], duration_seconds=time.monotonic() - started)
-            return True
         except Exception as exc:
             self._failure(exc)
             return False
+        if self.retention is not None:
+            try:
+                removed = self.retention.prune_after_verified_upload(path, m)
+                if removed:
+                    self._event(success=True, step=m['step'], pruned_local=removed)
+            except (ValueError, OSError) as exc:
+                self._event(success=False, error='LocalRetentionRejected', step=m['step'])
+                message = ('Local retention refused after verified remote backup '
+                           f'({type(exc).__name__}); latest local checkpoint preserved. '
+                           'Inspect output paths, manifests and permissions before retrying')
+                if self.policy == 'stop':
+                    raise SyncError(message) from None
+                warnings.warn(message, RuntimeWarning)
+                return False
+        return True
 
     def _upload(self, path):
         from huggingface_hub import CommitOperationAdd
@@ -289,6 +313,8 @@ class CheckpointSync:
             path_or_fileobj=json.dumps(m, sort_keys=True).encode()))
         commit = self.api.create_commit(self.repo, repo_type='model', operations=operations,
             parent_commit=info.sha, commit_message=f"Publish verified {self.stage} checkpoint {m['step']}")
+        if self._read(manifest_name, commit.oid) != m:
+            raise ValueError('Published remote checkpoint manifest mismatch')
         self._verify_remote(prefix, commit.oid, m)
         return dict(step=m['step'], bytes=payload, skipped=False)
 
@@ -335,8 +361,9 @@ class CheckpointSync:
                 raise FileExistsError('Local checkpoint conflicts with remote; use a new output directory')
             return str(dest)
         required = sum(f['size'] for f in m['files'].values())
-        from src.training.environment import check_transfer_disk
-        check_transfer_disk(self.output, self.cache_dir or self.output, required)
+        from src.training.environment import check_checkpoint_disk
+        # Model tensors are not loaded yet: reserve a whole checkpoint for export.
+        check_checkpoint_disk(self.output, self.cache_dir or self.output, required, required)
         # Preserve interrupted staging folders; Hub cache resumes partial transfers.
         staging = Path(tempfile.mkdtemp(prefix='.checkpoint-download-', dir=self.output))
         for name in m['files']:

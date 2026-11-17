@@ -95,7 +95,7 @@ def latest_checkpoint(output_dir):
     return str(max(candidates)[1]) if candidates else None
 
 
-def checkpoint_size_estimate(model, optimizer, extra=None):
+def checkpoint_size_estimate(model, optimizer=None, extra=None):
     """Conservative tensor payload budget; includes external predictors in extra."""
     def tensor_bytes(value):
         if hasattr(value, 'numel') and hasattr(value, 'element_size'):
@@ -110,7 +110,8 @@ def checkpoint_size_estimate(model, optimizer, extra=None):
                       if 'lora_' in name or 'modules_to_save' in name)
     else:
         weights = tensor_bytes(model.state_dict())
-    return int((weights + tensor_bytes(optimizer.state_dict()) + tensor_bytes(extra or {})) * 1.2) + 1024**2
+    return int((weights + (tensor_bytes(optimizer.state_dict()) if optimizer is not None else 0)
+                + tensor_bytes(extra or {})) * 1.2) + 1024**2
 
 
 def restore_cuda_rng(state, device=None):
@@ -158,15 +159,12 @@ def save_checkpoint(output_dir, model, optimizer, step, *, scaler=None, schedule
         raise FileExistsError(f'Checkpoint already exists: {destination}')
     # Interrupted writes remain hidden for inspection and cannot block retrying
     # the same optimizer step after recovery from an earlier complete checkpoint.
-    from src.training.environment import check_disk
+    from src.training.environment import check_checkpoint_disk
     estimate = checkpoint_size_estimate(model, optimizer, extra)
-    check_disk(destination.parent, estimate)
     from src.training.checkpoint_sync import ACTIVE_SYNC
     sync = ACTIVE_SYNC.get()
-    if sync is not None and sync.enabled:
-        # Both native checkpoint and read-back cache can reside on the same disk.
-        from src.training.environment import check_transfer_disk
-        check_transfer_disk(destination.parent, sync.cache_dir or destination.parent, estimate)
+    cache = (sync.cache_dir or destination.parent) if sync is not None and sync.enabled else None
+    check_checkpoint_disk(destination.parent, cache, estimate, checkpoint_size_estimate(model))
     path = Path(tempfile.mkdtemp(prefix=f'.checkpoint-{step}-', dir=destination.parent))
     if hasattr(model, 'save_pretrained'):
         model.save_pretrained(str(path))
@@ -195,6 +193,8 @@ def save_checkpoint(output_dir, model, optimizer, step, *, scaler=None, schedule
         sync.prepare_manifest(path, step, extra or {})
     # COMPLETE remains the last file written; staging is never discoverable.
     (path / 'COMPLETE').write_text('complete\n')
+    from src.training.checkpoint_sync import verify
+    verify(path)  # Check staged manifest/hashes before publishing the directory.
     if destination.exists():
         raise FileExistsError(f'Checkpoint already exists: {destination}')
     path.rename(destination)

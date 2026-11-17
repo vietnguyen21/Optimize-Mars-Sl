@@ -79,8 +79,34 @@ def check_disk(path, required, *, reserve=None):
     reserve = int(os.environ.get('CHECKPOINT_DISK_RESERVE_BYTES', str(256 * 1024**2))) if reserve is None else reserve
     if required < 0 or reserve < 0:
         raise ValueError('Disk budget must be nonnegative')
-    if shutil.disk_usage(path).free < required + reserve:
-        raise OSError(f'Insufficient disk space at {path}: need {required + reserve} bytes including reserve; no checkpoints deleted')
+    free = shutil.disk_usage(path).free
+    if free < required + reserve:
+        raise OSError(f'Insufficient disk space at {path}: have {free}, need {required + reserve} bytes including reserve; '
+                      'no checkpoints deleted. Increase capacity or move output/HF_HUB_CACHE to a larger filesystem')
+
+
+def check_checkpoint_disk(output, cache, payload, final_export):
+    """Budget additional save + read-back cache + final export before staging.
+
+    Existing checkpoints/cache already reduce free space. Never assume pruning
+    will succeed or reclaim bytes to make this save possible.
+    """
+    override = int(os.environ.get('CHECKPOINT_FINAL_EXPORT_RESERVE_BYTES', '0'))
+    if min(payload, final_export, override) < 0:
+        raise ValueError('Checkpoint/final export disk budgets must be nonnegative')
+    final_export = max(final_export, override)
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    if cache is None:
+        check_disk(output, payload + final_export)
+        return
+    cache = Path(cache)
+    cache.mkdir(parents=True, exist_ok=True)
+    if output.stat().st_dev == cache.stat().st_dev:
+        check_disk(output, 2 * payload + final_export)
+    else:
+        check_disk(output, payload + final_export)
+        check_disk(cache, payload)
 
 
 def check_transfer_disk(output, cache, payload):
