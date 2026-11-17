@@ -110,6 +110,7 @@ class CheckpointSync:
         self.count, self.last = 0, None
         self.configuration = None
         self.legacy_compatibility = None
+        self.legacy_compatibility_versions = (1,)
         self.remote_error = None
         self.cache_dir = None
         self.verified_uploads = set()
@@ -351,7 +352,7 @@ class CheckpointSync:
     def compatible(self, manifest):
         value = manifest.get('compatibility')
         return value == self.compatibility or (
-            manifest.get('compatibility_version', 1) == 1
+            manifest.get('compatibility_version', 1) in self.legacy_compatibility_versions
             and self.legacy_compatibility is not None and value == self.legacy_compatibility)
 
     def resolve(self, source=None):
@@ -463,6 +464,13 @@ def persistent_training(stage):
                     value = {p.relative_to(value).as_posix(): digest(p) for p in sorted(Path(value).rglob('*.sqlite'))}
                 legacy_contract[key] = value
             effective = dict(legacy_contract)
+            if stage == 'grounding':
+                strategy = effective.get('sampling_strategy', 'sequential')
+                if strategy not in ('sequential', 'epoch_shuffle_v1'):
+                    raise ValueError('Unknown embedding sampling strategy')
+                effective.update(sampling_strategy=strategy, sampling_version=1)
+                if strategy == 'sequential':
+                    legacy_contract.pop('sampling_strategy', None)
             if stage == 'sft_jepa_3b' and 'max_seq_length' in effective:
                 effective.setdefault('max_length', effective.pop('max_seq_length'))
             if stage == 'grpo_3b' and 'group_size' in effective:
@@ -478,6 +486,8 @@ def persistent_training(stage):
             manager = CheckpointSync(output, stage, fingerprint(effective))
             manager.configuration = effective
             manager.legacy_compatibility = fingerprint(legacy_contract)
+            if stage == 'grounding' and strategy == 'sequential':
+                manager.legacy_compatibility_versions = (1, 2)
             source = values.get('resume_from_checkpoint') or values.get('resume')
             resolved = manager.resolve(source)
             if 'resume_from_checkpoint' in bound.arguments:

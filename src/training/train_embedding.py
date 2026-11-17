@@ -277,6 +277,9 @@ def run_dry_run(
     }
 
 
+from src.training.embedding_sampling import EmbeddingSampler, SAMPLING_STRATEGIES, validate_embedding_extra
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="LitE-SQL HN-SupCon Embedding Trainer")
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen3-Embedding-0.6B")
@@ -291,6 +294,9 @@ def parse_args():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--max_steps", type=int, default=100)
     parser.add_argument("--resume_from_checkpoint")
+    parser.add_argument("--sampling_strategy", choices=SAMPLING_STRATEGIES, default="sequential")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     return parser.parse_args()
 
 
@@ -408,12 +414,14 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
                            db_dir=None, eval_path=None, dry_run=False, margin=0.1, temperature=0.05,
                            max_steps=100, max_length=256, learning_rate=2e-5, gradient_accumulation_steps=8,
                            save_steps=50, seed=42, device='cuda:0', resume_from_checkpoint=None, hard_negatives=4,
-                           **kwargs):
+                           sampling_strategy='sequential', **kwargs):
     """Fine-tune a real SentenceTransformer with differentiable HN-SupCon.
 
     One query/positive at a time, FP16 AMP and checkpointing fit the initial
     single-T4 target. max_steps counts optimizer updates, not microbatches.
     """
+    if sampling_strategy not in SAMPLING_STRATEGIES:
+        raise ValueError("Unknown embedding sampling strategy")
     if dry_run:
         return dict(run_dry_run(cards_path, bird_path, output_dir), mode='smoke', trained=False)
     if not TORCH_AVAILABLE:
@@ -454,17 +462,18 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
     contract = dict(phase='embedding', model_name_or_path=model_name_or_path,
         cards_sha256=dataset_fingerprint(cards_path), data_sha256=dataset_fingerprint(bird_path),
         seed=seed,max_length=max_length,gradient_accumulation_steps=gradient_accumulation_steps,
-        learning_rate=learning_rate,margin=margin,temperature=temperature,hard_negatives=hard_negatives)
+        learning_rate=learning_rate,margin=margin,temperature=temperature,hard_negatives=hard_negatives,
+        sampling_strategy=sampling_strategy,sampling_version=1)
     log = ExperimentLogger(output_dir,contract)
     step = 0
     if resume_from_checkpoint:
         path = latest_checkpoint(output_dir) if resume_from_checkpoint == 'latest' else resume_from_checkpoint
         if path is None:
             raise FileNotFoundError('No complete embedding checkpoint to resume')
-        state = load_checkpoint(path, model, optimizer, scaler=scaler, expected_extra={"contract": contract})
-        if state.get('extra', {}).get('contract') != contract:
-            raise ValueError('Embedding resume data/config differ from saved checkpoint')
+        state = load_checkpoint(path, model, optimizer, scaler=scaler, expected_extra={"contract": contract},
+                                extra_validator=validate_embedding_extra)
         step = state['step']
+    sampler = EmbeddingSampler(len(examples), seed, sampling_strategy)
     texts = [format_column_card_text(c) for c in cards]
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -475,7 +484,7 @@ def run_embedding_training(cards_path='data/mini/column_cards_mini.jsonl', bird_
     while step < max_steps:
         sum_loss = 0.0
         for micro in range(gradient_accumulation_steps):
-            index = (step * gradient_accumulation_steps + micro) % len(examples)
+            index = sampler.index(step * gradient_accumulation_steps + micro)
             item = examples[index]
             positive = item['positive'][(step + micro) % len(item['positive'])]
             # Mine semantically hardest same-database negatives using current model,

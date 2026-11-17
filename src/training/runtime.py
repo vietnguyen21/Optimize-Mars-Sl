@@ -203,7 +203,7 @@ def save_checkpoint(output_dir, model, optimizer, step, *, scaler=None, schedule
     return str(destination)
 
 
-def load_checkpoint(path, model, optimizer=None, *, scaler=None, scheduler=None, expected_extra=None):
+def load_checkpoint(path, model, optimizer=None, *, scaler=None, scheduler=None, expected_extra=None, extra_validator=None):
     """Load trusted local training checkpoints only; includes Python/NumPy RNG pickle."""
     import numpy as np
     import torch
@@ -215,7 +215,9 @@ def load_checkpoint(path, model, optimizer=None, *, scaler=None, scheduler=None,
     state = torch.load(p / 'training_state.pt', map_location='cpu', weights_only=False)
     if manifest and state.get('step') != manifest['step']:
         raise ValueError('Training state step differs from manifest')
-    if expected_extra and any(state.get('extra', {}).get(k) != v for k, v in expected_extra.items()):
+    if extra_validator is not None:
+        extra_validator(state.get('extra', {}), expected_extra)
+    elif expected_extra and any(state.get('extra', {}).get(k) != v for k, v in expected_extra.items()):
         raise ValueError('Resume checkpoint dataset/configuration mismatch')
     from src.training.model_identity import read_identity, verify_identity
     identity = getattr(model, '_training_base_identity', None)
