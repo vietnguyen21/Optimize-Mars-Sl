@@ -151,7 +151,7 @@ class TestModernEnvironment(unittest.TestCase):
             (site / 'namespace/other.py').touch()
 
             def dist(name, path):
-                return SimpleNamespace(metadata={'Name': name}, files=[PurePosixPath(path)], read_text=lambda _: 'record',
+                return SimpleNamespace(metadata={'Name': name}, version='1', read_text=lambda _: f'{path},,\n',
                                        locate_file=lambda value: site / value)
 
             protected = dist('torch', 'namespace/kernels.so')

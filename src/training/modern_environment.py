@@ -11,7 +11,8 @@ import sysconfig
 import tempfile
 
 from src.training.kaggle_distributions import (
-    active_distributions, python_roots, record_files, verified_origins,
+    active_distributions, file_sha256, ownership_index, protected_file_plan, python_roots,
+    record_files, verified_origins,
 )
 
 
@@ -59,33 +60,31 @@ def safe_env(name, pattern):
 
 
 def shared_library_fingerprint(inventory, borrowed=(), distributions=None):
-    # Track on-disk native files owned by protected distributions. Use stat
-    # metadata so bootstrapping does not read gigabytes of CUDA libraries.
-    native = {}
     protected = protected_packages(inventory, borrowed)
     selected = active_distributions() if distributions is None else distributions
-    for name in protected:
-        dist = selected[name]
-        native[f'{name}/import-origins'] = verified_origins(name, dist)
-        for relative in record_files(dist):
-            if not re.search(r'\.so(?:\.|$)', relative.name):
-                continue
-            path = dist.locate_file(relative)
-            stat = path.stat()
-            native[f'{name}/{relative}'] = [str(path.resolve()), stat.st_size, stat.st_mtime_ns]
-    return sha256(canonical_json(native).encode())
+    ownership = ownership_index(selected)
+    links, shared = protected_file_plan(ownership, protected)
+    origins = {name: verified_origins(name, selected[name], ownership=ownership, allowed=protected)
+               for name in protected}
+    native = {}
+    for relative, path in links.items():
+        if re.search(r'\.so(?:\.|$)', relative.name):
+            native[str(relative)] = [str(path.resolve()), file_sha256(path).hex()]
+    return sha256(canonical_json({'origins': origins, 'native': native, 'shared': shared}).encode())
 
 
-def runtime_identity(inventory, borrowed=(), distributions=None):
+def runtime_identity(inventory, borrowed=(), distributions=None, *, expected_fingerprint=None):
     if 'torch' not in inventory:
         raise RuntimeError('Modern M0 requires the preinstalled Kaggle CUDA torch distribution')
     selected = active_distributions() if distributions is None else distributions
     library_fingerprint = shared_library_fingerprint(inventory, borrowed, selected)
+    if expected_fingerprint is not None and library_fingerprint != expected_fingerprint:
+        raise RuntimeError('Isolated runtime differs from the recorded image CUDA fingerprint')
     import torch
     from src.training.environment import validate_torch_build
 
     validate_torch_build(torch, inventory['torch']['version'])
-    verified_origins('torch', selected['torch'])
+    verified_origins('torch', selected['torch'], ownership=ownership_index(selected))
     image = {
         'digest': safe_env('KAGGLE_IMAGE_DIGEST', r'sha256:[a-f0-9]{64}'),
         'build_commit': safe_env('GIT_COMMIT', r'[a-f0-9]{40}'),
@@ -205,11 +204,15 @@ def wheel_record(entry):
 
 
 def isolated_runtime(inventory):
-    from src.training.kaggle_isolation import isolated_image
+    from src.training.kaggle_isolation import BRIDGE_DIR, isolated_image, verify_bridge_files
 
     image = isolated_image()
-    runtime = runtime_identity(inventory, image['runtime']['protected_packages'])
-    if runtime != image['runtime']:
+    captured = image['runtime']
+    selected = active_distributions()
+    verify_bridge_files(Path(sys.prefix) / BRIDGE_DIR, captured['protected_packages'], ownership_index(selected))
+    runtime = runtime_identity(inventory, captured['protected_packages'], selected,
+                               expected_fingerprint=captured['protected_library_fingerprint'])
+    if runtime != captured:
         raise RuntimeError('Isolated runtime differs from the recorded image CUDA fingerprint')
     require_target(runtime)
     return runtime, image['global_pip']
@@ -334,11 +337,12 @@ def verify_application_imports(lock):
     selected = active_distributions()
     borrowed = lock['runtime']['protected_packages']
     prefix = Path(sys.prefix).resolve()
+    ownership = ownership_index(selected)
     for name in lock['packages'].keys() - borrowed.keys():
         dist = selected[name]
         if not Path(dist.locate_file('')).resolve().is_relative_to(prefix):
             raise RuntimeError(f'Application distribution is outside the isolated venv: {name}')
-        origins = verified_origins(name, dist)
+        origins = verified_origins(name, dist, ownership=ownership)
         for value in origins.values():
             paths = value if isinstance(value, list) else [value]
             if any(not Path(path).is_relative_to(prefix) for path in paths):

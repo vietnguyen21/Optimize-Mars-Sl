@@ -1,12 +1,13 @@
 """Create a project-only venv that borrows the image's protected CUDA stack."""
-from collections import defaultdict
 import json
 from pathlib import Path
 import sys
 import sysconfig
 import venv
 
-from src.training.kaggle_distributions import active_distributions, record_files, verified_origins
+from src.training.kaggle_distributions import (
+    active_distributions, ownership_index, protected_file_plan, verified_origins,
+)
 
 
 BRIDGE_DIR = 'kaggle-image-packages'
@@ -14,58 +15,19 @@ PROVENANCE = 'kaggle-image.json'
 
 
 def protected_import_paths(distributions, protected):
-    """Use wheel RECORD ownership to link complete package directories safely."""
-
-    records = defaultdict(list)
-    for name, dist in distributions.items():
-        if name in protected:
-            verified_origins(name, dist)
-        files = record_files(dist)
-        root = Path(dist.locate_file('')).resolve()
-        for file in files:
-            if name in protected:
-                actual = Path(dist.locate_file(file)).resolve()
-                if not actual.is_relative_to(root):
-                    raise RuntimeError(f'Protected RECORD points outside its installation: {name}')
-            top = file.parts[0]
-            if top == '__pycache__':
-                continue
-            path = Path(dist.locate_file(top)).absolute()
-            records[path].append((file.parts[1:], name))
-
-    def select(path, claims):
-        names = {name for _, name in claims}
-        if names.isdisjoint(protected):
-            return
-        file_owners = defaultdict(set)
-        for parts, name in claims:
-            file_owners[parts].add(name)
-        if any(len(owners) > 1 and not owners.isdisjoint(protected)
-               for owners in file_owners.values()):
-            raise RuntimeError(f'Protected file shares ownership with {sorted(names)}')
-        if names <= protected:
-            if path.exists():
-                yield path
-            return
-        if any(not parts for parts, _ in claims):
-            raise RuntimeError(f'Protected file shares ownership with {sorted(names)}')
-        # A namespace package can contain independent subpackages from many wheels.
-        children = defaultdict(list)
-        for parts, name in claims:
-            children[parts[0]].append((parts[1:], name))
-        for child, child_claims in children.items():
-            yield from select(path / child, child_claims)
-
-    links = {}
-    roots = {}
-    for path, claims in records.items():
-        for source in select(path, claims):
-            relative = Path(path.name) / source.relative_to(path)
-            if path.name in roots and roots[path.name] != path:
-                raise RuntimeError(f'Protected import path collision: {path.name}')
-            roots[path.name] = path
-            links[relative] = source
+    """Expose only authorized files, preserving their relative wheel layout."""
+    ownership = ownership_index(distributions)
+    for name in protected:
+        verified_origins(name, distributions[name], ownership=ownership, allowed=protected)
+    links, _ = protected_file_plan(ownership, protected, source=True)
     return links
+
+
+def verify_bridge_files(bridge, protected, ownership):
+    links, _ = protected_file_plan(ownership, protected)
+    actual = {path for path in bridge.rglob('*') if path.is_symlink() or not path.is_dir()}
+    if actual != set(links.values()) or any(not path.is_symlink() or not path.is_file() for path in actual):
+        raise RuntimeError('Protected bridge has missing or unauthorized files')
 
 
 def create_modern_venv(destination):
@@ -84,9 +46,9 @@ def create_modern_venv(destination):
     borrowed, issues = dependency_graph(inventory, list(protected_packages(inventory)))
     if issues:
         raise RuntimeError(f'The Kaggle image CUDA dependency closure is inconsistent: {issues}')
+    links = protected_import_paths(selected, borrowed)
     runtime = runtime_identity(inventory, borrowed, selected)
     require_target(runtime)
-    links = protected_import_paths(selected, borrowed)
     return create_isolated_venv(destination, links, {'runtime': runtime, 'global_pip': pip_check()})
 
 

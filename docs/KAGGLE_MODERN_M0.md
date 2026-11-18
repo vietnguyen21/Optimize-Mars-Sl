@@ -108,3 +108,47 @@ Repeat bridge creation and resolution for core with a separate venv and evidence
 - The isolated CPU matrix ran 153 tests with 153 passed and zero skips. This includes 9 distribution tests, 12 modern environment tests, 22 legacy environment tests, 4 notebook tests, 34 SQL audit tests, 16 Grounding/System-1 pipeline tests, 25 Grounding tests, 30 grammar/validation tests, and one tiny native Grounding fixture.
 - A local CPU bridge rehearsal resolved core and grounding with 30 and 37 hashed application wheels respectively, zero fatal active and introduced conflicts, and no protected replacement. The Grounding install and locked imports passed. The test harness bypassed the target GPU eligibility predicate only. Neither these locks nor the local duplicate scan certify the Kaggle image.
 - Live duplicate enumeration, corroboration of ownership for the full protected closure, image-bound lock review, and both T4 kernel checks remain required. Same-rank distribution ambiguity, shared file ownership, or a truly active missing native RECORD may still block the live run.
+
+## M0.3e NVIDIA shared-package ownership
+
+The reported `nvidia-libnvcomp-cu13==5.2.0.13` owns `nvidia/libnvcomp/__init__.py`. The import verifier had treated the shared `nvidia/__init__.py` as an import owned by libnvcomp. The image reports `nvidia-curand-cu12` and `nvidia-nvimgcodec-cu13` as the parent claimants. Their recorded hashes and installed bytes still need inspection on the running image.
+
+The verifier now resolves nested modules using filesystem import specs one package segment at a time. Parent code is never imported for this lookup. A regular parent must have separate RECORD ownership, while a PEP 420 namespace is resolved through its search locations. Every shared file must have the same logical and real source, authorized claimants, matching SHA-256 entries in every RECORD, and matching installed bytes and recorded sizes. Missing hashes, divergent content, and overlapping claims from outside the protected closure block bridging. This policy applies to any package name.
+
+The bridge links individual authorized RECORD files into their original relative layout. Bytecode caches, Windows launchers, and unrecorded neighbors stay outside it. A protected source symlink that escapes its installation fails, and preflight rejects missing or extra bridge files. The fingerprint captures nested import origins, accepted shared owner names and versions, and the actual SHA-256 of protected native files. Fingerprint drift stops preflight before importing torch.
+
+### Live qualification
+
+Run from a fresh Kaggle session using the image interpreter for the ownership report and bridge creation.
+
+```bash
+mkdir -p /kaggle/working/m03e-evidence
+python -I -B scripts/check_kaggle_environment.py --profile MODERN \
+  --inspect-modern-file nvidia/__init__.py > /kaggle/working/m03e-evidence/nvidia-parent.json
+python -I -B scripts/check_kaggle_environment.py --profile MODERN \
+  --create-modern-venv /kaggle/working/m03e-grounding-venv
+/kaggle/working/m03e-grounding-venv/bin/python -I -B scripts/check_kaggle_environment.py \
+  --profile MODERN --stage grounding --resolve-modern-lock \
+  --output /kaggle/working/m03e-evidence/grounding
+```
+
+Check that the parent report identifies both declared owners at the same file with matching hashes and no errors. Stop on any disagreement. Review the image-bound lock, including zero active and introduced conflicts, zero planned protected replacements, and wheel hashes. Set `KAGGLE_MODERN_LOCK` to the reviewed path and `KAGGLE_MODERN_LOCK_SHA256` to its reviewed digest. Run installation and preflight separately.
+
+```bash
+MODERN_PYTHON=/kaggle/working/m03e-grounding-venv/bin/python
+"$MODERN_PYTHON" -I -B scripts/check_kaggle_environment.py --profile MODERN --stage grounding \
+  --install-modern-lock --output /kaggle/working/m03e-evidence/installed
+"$MODERN_PYTHON" -I -B -c 'import torch, sqlglot, nvidia.libnvcomp as nv; from pathlib import Path; print(torch.__version__, Path(torch.__file__).resolve(), sqlglot.__version__, Path(sqlglot.__file__).resolve(), Path(nv.__file__).resolve())'
+"$MODERN_PYTHON" -I -B scripts/check_kaggle_environment.py --profile MODERN --stage grounding \
+  --device cuda:0 --output /kaggle/working/m03e-evidence/cuda0
+"$MODERN_PYTHON" -I -B scripts/check_kaggle_environment.py --profile MODERN --stage grounding \
+  --device cuda:1 --output /kaggle/working/m03e-evidence/cuda1
+```
+
+Check that torch and libnvcomp resolve to the original image files and SQLGlot 26.16.4 resolves within the application venv. The actual NVIDIA hashes, source image layout, and T4 kernel behavior remain live gates. Hashing the native stack reads the installed library bytes and can add startup time.
+
+### M0.3e local validation
+
+- Dependency-light discovery ran 380 tests with 295 passed and 85 dependency-required skips.
+- The isolated CPU regression matrix passed all 158 tests with zero skips, including 14 distribution ownership tests and the existing modern, legacy, and notebook suites.
+- A fresh file-level CPU bridge completed both binary-only resolves with zero fatal active conflicts, zero introduced conflicts, and zero protected replacements. Core resolved 30 hashed application wheels and Grounding 37. The hash-checked Grounding install passed, isolated pip check was clean, and a fresh interpreter loaded torch from its original environment and SQLGlot 26.16.4 from the venv. The CPU harness bypassed Kaggle runtime eligibility only. These locks are local evidence.
