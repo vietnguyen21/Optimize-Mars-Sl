@@ -18,16 +18,27 @@ def main():
     parser.add_argument('--smoke', action='store_true')
     parser.add_argument('--quantization', action='store_true')
     parser.add_argument('--profile', choices=('LEGACY', 'MODERN'))
-    parser.add_argument('--resolve-modern-lock', action='store_true')
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument('--resolve-modern-lock', action='store_true')
+    action.add_argument('--create-modern-venv', metavar='PATH')
+    action.add_argument('--install-modern-lock', action='store_true')
     args = parser.parse_args()
     profile = selected_profile(args.profile)
-    if args.resolve_modern_lock:
+    repo = Path(__file__).resolve().parents[1]
+    if args.resolve_modern_lock or args.create_modern_venv or args.install_modern_lock:
         if profile != 'MODERN' or args.smoke or args.quantization:
-            parser.error('--resolve-modern-lock requires MODERN without smoke or quantization')
-        from src.training.modern_environment import resolve_candidate
-        resolve_candidate(Path(__file__).resolve().parents[1], args.stage, args.output)
+            parser.error('Modern environment actions require MODERN without smoke or quantization')
+        if args.create_modern_venv:
+            from src.training.kaggle_isolation import create_modern_venv
+            print(create_modern_venv(args.create_modern_venv))
+        elif args.resolve_modern_lock:
+            from src.training.modern_environment import resolve_candidate
+            resolve_candidate(repo, args.stage, args.output)
+        else:
+            from src.training.modern_environment import modern_operation
+            modern_operation(repo, args.stage, args.output, install=True)
         return
-    result = validate_environment(Path(__file__).resolve().parents[1], args.stage,
+    result = validate_environment(repo, args.stage,
         args.output, args.device, smoke=args.smoke, quantization=args.quantization, profile=profile)
     if args.smoke:
         print(result)

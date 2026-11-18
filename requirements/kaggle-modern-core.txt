@@ -6,6 +6,6 @@ tokenizers==0.23.3
 safetensors==0.8.0
 numpy>=1.26,<3
 packaging>=20
-networkx==3.4.2
+networkx==3.7
 sqlglot==26.16.4
-pydantic==2.11.3
+pydantic==2.14.1

@@ -110,6 +110,19 @@ def initialize_environment(repo_dir, stage, output_dir, *, smoke=False, device='
     return validate_environment(repo_dir, stage, output_dir, device, smoke=smoke, quantization=True, profile=profile)
 
 
+def validate_modern_notebook_environment(repo_dir, stage, output_dir, device):
+    """Use the isolated interpreter while leaving the host notebook kernel alone."""
+    python = os.environ.get('KAGGLE_MODERN_PYTHON')
+    if not python or not Path(python).is_absolute():
+        raise RuntimeError('Set KAGGLE_MODERN_PYTHON to the absolute path of the modern venv Python')
+    command = [python, '-I', '-B', str(Path(repo_dir) / 'scripts/check_kaggle_environment.py'),
+               '--profile', 'MODERN', '--stage', stage, '--output', str(output_dir),
+               '--device', device]
+    if os.environ.get('INSTALL_DEPS') == '1':
+        subprocess.run(command + ['--install-modern-lock'], check=True)
+    subprocess.run(command, check=True)
+
+
 def environment_report(output_dir):
     packages = {}
     for name in ('torch', 'transformers', 'accelerate', 'peft', 'bitsandbytes', 'sentence-transformers', 'huggingface-hub', 'tokenizers', 'safetensors', 'pydantic', 'networkx', 'sqlglot', 'numpy'):

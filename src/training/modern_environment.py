@@ -33,14 +33,16 @@ def package_inventory():
 
 
 def protected_name(name):
-    return name in {'torch', 'torchvision', 'torchaudio', 'triton', 'pytorch-triton'} or (
+    # packaging is borrowed because the resolver uses it before any install.
+    return name in {'torch', 'torchvision', 'torchaudio', 'triton', 'pytorch-triton', 'packaging'} or (
         name.startswith(('nvidia-', 'cuda-', 'cupy-', 'pytorch-triton-', 'jax-cuda', 'cudf-', 'cuml-'))
         or name.endswith(('-cu11', '-cu12', '-cu13'))
     )
 
 
-def protected_packages(inventory):
-    return {name: package['version'] for name, package in inventory.items() if protected_name(name)}
+def protected_packages(inventory, borrowed=()):
+    return {name: package['version'] for name, package in inventory.items()
+            if protected_name(name) or name in borrowed}
 
 
 def command_result(command):
@@ -59,13 +61,13 @@ def safe_env(name, pattern):
     return value if re.fullmatch(pattern, value) else None
 
 
-def shared_library_fingerprint(inventory):
+def shared_library_fingerprint(inventory, borrowed=()):
     # Track on-disk native files owned by protected distributions. Use stat
     # metadata so bootstrapping does not read gigabytes of CUDA libraries.
     from packaging.utils import canonicalize_name
 
     native = {}
-    protected = protected_packages(inventory)
+    protected = protected_packages(inventory, borrowed)
     for dist in metadata.distributions():
         name = canonicalize_name(dist.metadata['Name'] or '')
         if name not in protected:
@@ -79,7 +81,7 @@ def shared_library_fingerprint(inventory):
     return sha256(canonical_json(native).encode())
 
 
-def runtime_identity(inventory):
+def runtime_identity(inventory, borrowed=()):
     if 'torch' not in inventory:
         raise RuntimeError('Modern M0 requires the preinstalled Kaggle CUDA torch distribution')
     import torch
@@ -105,8 +107,8 @@ def runtime_identity(inventory):
         'torch_build': str(torch.__version__), 'cuda_runtime': torch.version.cuda,
         'driver_versions': sorted(set(driver['stdout'].split())) if driver['returncode'] == 0 else [],
         'devices': devices, 'torch_arches': torch.cuda.get_arch_list(),
-        'protected_packages': protected_packages(inventory),
-        'protected_library_fingerprint': shared_library_fingerprint(inventory),
+        'protected_packages': protected_packages(inventory, borrowed),
+        'protected_library_fingerprint': shared_library_fingerprint(inventory, borrowed),
     }
 
 
@@ -177,8 +179,15 @@ def classify(before, after, roots):
     }
 
 
+def run_pip_install(command):
+    # Discard pip settings that could redirect a reviewed install out of the venv.
+    environment = {name: value for name, value in os.environ.items() if not name.startswith('PIP_')}
+    environment['PIP_CONFIG_FILE'] = os.devnull
+    subprocess.run(command, env=environment, check=True)
+
+
 def report_plan(command, path):
-    subprocess.run(command + ['--dry-run', '--report', str(path)], check=True)
+    run_pip_install(command + ['--dry-run', '--report', str(path)])
     return json.loads(path.read_text())['install']
 
 
@@ -197,6 +206,17 @@ def wheel_record(entry):
     return {'filename': filename, 'sha256': digest}
 
 
+def isolated_runtime(inventory):
+    from src.training.kaggle_isolation import isolated_image
+
+    image = isolated_image()
+    runtime = runtime_identity(inventory, image['runtime']['protected_packages'])
+    if runtime != image['runtime']:
+        raise RuntimeError('Isolated runtime differs from the recorded image CUDA fingerprint')
+    require_target(runtime)
+    return runtime, image['global_pip']
+
+
 def resolve_candidate(repo, stage, output):
     """Resolve without installing. Produce a draft to review on the running image."""
     from packaging.utils import canonicalize_name
@@ -207,13 +227,13 @@ def resolve_candidate(repo, stage, output):
     profile = profile_path(repo, stage, profile='MODERN')
     roots = sorted(str(req) for req in requirements(profile).values())
     inventory = package_inventory()
-    runtime = runtime_identity(inventory)
+    runtime, image_pip = isolated_runtime(inventory)
     diagnostics = {'schema_version': 1, 'profile': 'MODERN', 'stage': stage,
                    'runtime': runtime, 'repository': repository_commit(repo),
-                   'global_pip_before': pip_check()}
+                   'image_global_pip': image_pip, 'global_pip_before': pip_check()}
     (output / 'modern-resolution.json').write_text(canonical_json(diagnostics))
-    require_target(runtime)
-    pip = [sys.executable, '-m', 'pip', 'install', '--only-binary=:all:']
+    pip = pip_install_command()
+    protected = runtime['protected_packages']
     with tempfile.TemporaryDirectory() as tmp:
         constraints = Path(tmp) / 'protected.txt'
         constraints.write_text(''.join(f'{name}=={version}\n'
@@ -225,7 +245,7 @@ def resolve_candidate(repo, stage, output):
         for entry in entries:
             package = entry['metadata']
             name = canonicalize_name(package['name'])
-            if protected_name(name):
+            if protected_name(name) or name in protected:
                 raise RuntimeError(f'Resolver plans to replace protected package {name}')
             projected[name] = {'version': package['version'], 'requires_dist': package.get('requires_dist', [])}
             planned[name] = wheel_record(entry)
@@ -236,7 +256,7 @@ def resolve_candidate(repo, stage, output):
             raise RuntimeError('Resolver introduced conflicts or failed active closure; see modern-resolution.json')
         active = {name: projected[name] for name in diagnosis['active_packages']}
         pinned = [f"{name}=={package['version']}" for name, package in active.items()
-                  if not protected_name(name) and name not in planned]
+                  if name not in protected and name not in planned]
         if pinned:
             for entry in report_plan(pip + ['--ignore-installed', '--no-deps', *pinned], report):
                 package = entry['metadata']
@@ -244,7 +264,7 @@ def resolve_candidate(repo, stage, output):
                 if sorted(package.get('requires_dist', [])) != sorted(active[name]['requires_dist']):
                     raise RuntimeError(f'Published wheel metadata differs from installed metadata for {name}')
                 planned[name] = wheel_record(entry)
-    expected_wheels = {name for name in active if not protected_name(name)}
+    expected_wheels = {name for name in active if name not in protected}
     if planned.keys() != expected_wheels:
         raise RuntimeError('Resolver did not produce wheel hashes for the full application closure')
     lock = {'schema_version': 1, 'profile': 'MODERN', 'stage': stage, 'roots': roots,
@@ -256,8 +276,13 @@ def resolve_candidate(repo, stage, output):
     return path
 
 
+def pip_install_command():
+    return [sys.executable, '-I', '-B', '-m', 'pip', '--isolated',
+            'install', '--no-compile', '--only-binary=:all:']
+
+
 def pip_check():
-    return command_result([sys.executable, '-m', 'pip', 'check'])
+    return command_result([sys.executable, '-I', '-B', '-m', 'pip', 'check'])
 
 
 def validate_global_check(result, diagnosis, report_file):
@@ -316,10 +341,10 @@ def modern_operation(repo, stage, output, *, install=False):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     check_disk(output, 0)
-    runtime = runtime_identity(before)
+    runtime, image_pip = isolated_runtime(before)
     report = {'schema_version': 1, 'profile': 'MODERN', 'stage': stage, 'runtime': runtime,
               'repository': repository_commit(repo),
-              'global_pip_before': pip_check()}
+              'image_global_pip': image_pip, 'global_pip_before': pip_check()}
     report_file = output / ('modern-bootstrap.json' if install else 'modern-preflight.json')
 
     def save():
@@ -343,7 +368,7 @@ def modern_operation(repo, stage, output, *, install=False):
         changes = {name: package for name, package in lock['packages'].items() if name not in before
                    or before[name]['version'] != package['version']
                    or sorted(before[name]['requires_dist']) != sorted(package['requires_dist'])}
-        if any(protected_name(name) for name in changes):
+        if any(protected_name(name) or name in runtime['protected_packages'] for name in changes):
             raise RuntimeError('Modern installation would replace a protected distribution')
         for name in changes:
             if name.replace('-', '_') in sys.modules:
@@ -363,19 +388,21 @@ def modern_operation(repo, stage, output, *, install=False):
                         raise RuntimeError(f'Invalid wheel hash for {name}')
                     lines.append(f"{name}=={package['version']} --hash=sha256:{wheel['sha256']}\n")
                 path.write_text(''.join(lines))
-                pip = [sys.executable, '-m', 'pip', 'install', '--only-binary=:all:',
-                       '--require-hashes', '--no-deps', '--force-reinstall', '-r', str(path)]
+                pip = pip_install_command() + [
+                    '--require-hashes', '--no-deps', '--force-reinstall', '-r', str(path),
+                ]
                 entries = report_plan(pip, Path(tmp) / 'verified.json')
                 resolved = {canonicalize_name(entry['metadata']['name']): wheel_record(entry) for entry in entries}
                 if resolved != {name: lock['wheels'][name] for name in changes}:
                     raise RuntimeError('Hashed dry-run disagrees with reviewed lock')
-                subprocess.run(pip, check=True)
+                run_pip_install(pip)
     after = package_inventory()
     report['global_pip_after'] = pip_check()
     report['conflicts'] = classify(before, after, lock['roots'] + list(runtime['protected_packages']))
     save()
-    if (protected_packages(after) != runtime['protected_packages']
-            or shared_library_fingerprint(after) != runtime['protected_library_fingerprint']):
+    borrowed = runtime['protected_packages']
+    if (protected_packages(after, borrowed) != borrowed
+            or shared_library_fingerprint(after, borrowed) != runtime['protected_library_fingerprint']):
         raise RuntimeError('Protected CUDA distribution inventory changed')
     diagnosis = report['conflicts']
     if diagnosis['fatal_active'] or diagnosis['introduced']:

@@ -218,7 +218,7 @@ class TestSQLGroundingAudit(unittest.TestCase):
                         GROUNDING_AUDIT_DIR=str(self.root/'nb-audit')), \
              patch('src.training.train_embedding.run_embedding_training') as train, \
              patch('src.training.train_embedding.run_dry_run') as smoke:
-            namespace=dict(os=os,Path=Path,json=json,paths=paths,OUTPUT_DIR=str(output),SMOKE=False,
+            namespace=dict(PROFILE='LEGACY',os=os,Path=Path,json=json,paths=paths,OUTPUT_DIR=str(output),SMOKE=False,
                            SEED=42,RESUME='none',MAX_STEPS=2,MAX_LENGTH=8,SAVE_STEPS=1)
             exec(compile(code,'notebook01-cell4','exec'),namespace)
             train.assert_not_called();smoke.assert_not_called()
@@ -234,7 +234,7 @@ class TestSQLGroundingAudit(unittest.TestCase):
              patch('src.training.kaggle.initialize_environment',return_value={}), \
              patch('src.training.kaggle.environment_report',return_value={'gpus':[]}) as report, \
              patch('src.training.kaggle.initialize_checkpoint_backend') as backend:
-            namespace=dict(os=os,Path=Path,paths=paths,SMOKE=False,REPO_DIR=root,environment_report=report)
+            namespace=dict(PROFILE='LEGACY',os=os,Path=Path,paths=paths,SMOKE=False,REPO_DIR=root,environment_report=report)
             exec(compile(''.join(notebook['cells'][2]['source']),'notebook01-cell2','exec'),namespace)
             backend.assert_not_called()
             self.assertIsNone(namespace['checkpoint_backend'])

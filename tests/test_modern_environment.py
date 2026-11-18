@@ -1,14 +1,16 @@
 """M0 contract tests using synthetic inventory and resolver metadata."""
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.training.environment import profile_path, requirements, selected_profile
-from src.training.kaggle import install_dependencies
+from src.training.kaggle import install_dependencies, validate_modern_notebook_environment
+from src.training.kaggle_isolation import isolated_image, protected_import_paths
 from src.training import modern_environment as modern
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +29,9 @@ class TestModernEnvironment(unittest.TestCase):
         self.assertEqual(str(roots['transformers']), 'transformers==5.20.2')
         self.assertEqual(str(roots['sentence-transformers']), 'sentence-transformers==5.3.0')
         self.assertNotIn('bitsandbytes', roots)
+        self.assertEqual(str(roots['pydantic'].specifier), '==2.14.1')
+        self.assertEqual(str(roots['networkx'].specifier), '==3.7')
+        self.assertEqual(str(roots['sqlglot'].specifier), '==26.16.4')
         with self.assertRaises(ValueError):
             profile_path(ROOT, 'evaluation', profile='MODERN')
         with self.assertRaises(ValueError):
@@ -85,7 +90,7 @@ class TestModernEnvironment(unittest.TestCase):
         before = {'scikit-learn': package('1')}
         with tempfile.TemporaryDirectory() as directory, (
             patch.object(modern, 'package_inventory', return_value=before)
-        ), patch.object(modern, 'runtime_identity', return_value=runtime), (
+        ), patch.object(modern, 'isolated_runtime', return_value=(runtime, {'returncode': 0})), (
             patch.object(modern, 'checked_lock', return_value=(lock, 'digest'))
         ), patch.object(modern, 'pip_check', return_value={'returncode': 0}), (
             patch.object(modern, 'repository_commit', return_value={'commit': 'a' * 40})
@@ -104,7 +109,7 @@ class TestModernEnvironment(unittest.TestCase):
                        'stderr': ''}
         with tempfile.TemporaryDirectory() as directory, (
             patch.object(modern, 'package_inventory', return_value=inventory)
-        ), patch.object(modern, 'runtime_identity', return_value=runtime), (
+        ), patch.object(modern, 'isolated_runtime', return_value=(runtime, {'returncode': 0})), (
             patch.object(modern, 'checked_lock', return_value=(lock, 'digest'))
         ), patch.object(modern, 'pip_check', return_value=diagnostics), (
             patch.object(modern, 'repository_commit', return_value={'commit': 'a' * 40})
@@ -134,3 +139,38 @@ class TestModernEnvironment(unittest.TestCase):
         entry['download_info']['archive_info'] = {}
         with self.assertRaisesRegex(RuntimeError, 'hashed binary'):
             modern.wheel_record(entry)
+
+    def test_shared_namespace_exposes_only_borrowed_distribution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory)
+            (site / 'namespace').mkdir()
+            torch_file = site / 'namespace/kernels.so'
+            torch_file.touch()
+            (site / 'namespace/other.py').touch()
+
+            def dist(name, path):
+                return SimpleNamespace(metadata={'Name': name}, files=[PurePosixPath(path)],
+                                       locate_file=lambda value: site / value)
+
+            protected = dist('torch', 'namespace/kernels.so')
+            unrelated = dist('unrelated', 'namespace/other.py')
+            self.assertEqual(protected_import_paths([protected, unrelated], {'torch'}),
+                             {Path('namespace/kernels.so'): torch_file})
+            with self.assertRaisesRegex(RuntimeError, 'shares ownership'):
+                protected_import_paths([protected, dist('unrelated', 'namespace/kernels.so')], {'torch'})
+
+    def test_normal_process_cannot_install_into_host(self):
+        flags = SimpleNamespace(isolated=False, dont_write_bytecode=True)
+        with patch.object(sys, 'flags', flags):
+            with self.assertRaisesRegex(RuntimeError, 'venv Python'):
+                isolated_image()
+
+    def test_notebook_runs_install_and_preflight_in_separate_isolated_processes(self):
+        with patch.dict(os.environ, {'KAGGLE_MODERN_PYTHON': '/tmp/test-venv/bin/python',
+                                     'INSTALL_DEPS': '1'}), patch('src.training.kaggle.subprocess.run') as run:
+            validate_modern_notebook_environment(ROOT, 'grounding', '/tmp/report', 'cuda:1')
+        self.assertEqual(len(run.call_args_list), 2)
+        install, validate = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(install, validate + ['--install-modern-lock'])
+        self.assertEqual(validate[:3], ['/tmp/test-venv/bin/python', '-I', '-B'])
+        self.assertEqual(validate[-2:], ['--device', 'cuda:1'])
