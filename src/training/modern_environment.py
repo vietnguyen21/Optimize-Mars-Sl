@@ -1,6 +1,5 @@
 """Image-bound, reviewable Kaggle application dependency plans."""
 import hashlib
-import importlib.metadata as metadata
 import json
 import os
 from pathlib import Path
@@ -11,6 +10,10 @@ import sys
 import sysconfig
 import tempfile
 
+from src.training.kaggle_distributions import (
+    active_distributions, python_roots, record_files, verified_origins,
+)
+
 
 def canonical_json(value):
     return json.dumps(value, sort_keys=True, indent=2) + '\n'
@@ -20,16 +23,10 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def package_inventory():
-    from packaging.utils import canonicalize_name
-
-    result = {}
-    for dist in metadata.distributions():
-        if dist.metadata['Name']:
-            result.setdefault(canonicalize_name(dist.metadata['Name']), {
-                'version': dist.version, 'requires_dist': list(dist.requires or []),
-            })
-    return result
+def package_inventory(distributions=None):
+    selected = active_distributions() if distributions is None else distributions
+    return {name: {'version': dist.version, 'requires_dist': list(dist.requires or [])}
+            for name, dist in selected.items()}
 
 
 def protected_name(name):
@@ -61,33 +58,34 @@ def safe_env(name, pattern):
     return value if re.fullmatch(pattern, value) else None
 
 
-def shared_library_fingerprint(inventory, borrowed=()):
+def shared_library_fingerprint(inventory, borrowed=(), distributions=None):
     # Track on-disk native files owned by protected distributions. Use stat
     # metadata so bootstrapping does not read gigabytes of CUDA libraries.
-    from packaging.utils import canonicalize_name
-
     native = {}
     protected = protected_packages(inventory, borrowed)
-    for dist in metadata.distributions():
-        name = canonicalize_name(dist.metadata['Name'] or '')
-        if name not in protected:
-            continue
-        for relative in dist.files or ():
+    selected = active_distributions() if distributions is None else distributions
+    for name in protected:
+        dist = selected[name]
+        native[f'{name}/import-origins'] = verified_origins(name, dist)
+        for relative in record_files(dist):
             if not re.search(r'\.so(?:\.|$)', relative.name):
                 continue
             path = dist.locate_file(relative)
             stat = path.stat()
-            native[f'{name}/{relative}'] = [stat.st_size, stat.st_mtime_ns]
+            native[f'{name}/{relative}'] = [str(path.resolve()), stat.st_size, stat.st_mtime_ns]
     return sha256(canonical_json(native).encode())
 
 
-def runtime_identity(inventory, borrowed=()):
+def runtime_identity(inventory, borrowed=(), distributions=None):
     if 'torch' not in inventory:
         raise RuntimeError('Modern M0 requires the preinstalled Kaggle CUDA torch distribution')
+    selected = active_distributions() if distributions is None else distributions
+    library_fingerprint = shared_library_fingerprint(inventory, borrowed, selected)
     import torch
     from src.training.environment import validate_torch_build
 
-    validate_torch_build(torch, inventory.get('torch', {}).get('version'))
+    validate_torch_build(torch, inventory['torch']['version'])
+    verified_origins('torch', selected['torch'])
     image = {
         'digest': safe_env('KAGGLE_IMAGE_DIGEST', r'sha256:[a-f0-9]{64}'),
         'build_commit': safe_env('GIT_COMMIT', r'[a-f0-9]{40}'),
@@ -108,7 +106,7 @@ def runtime_identity(inventory, borrowed=()):
         'driver_versions': sorted(set(driver['stdout'].split())) if driver['returncode'] == 0 else [],
         'devices': devices, 'torch_arches': torch.cuda.get_arch_list(),
         'protected_packages': protected_packages(inventory, borrowed),
-        'protected_library_fingerprint': shared_library_fingerprint(inventory, borrowed),
+        'protected_library_fingerprint': library_fingerprint,
     }
 
 
@@ -331,6 +329,22 @@ def validate_lock_packages(lock, inventory):
             raise RuntimeError(f'Modern dependency metadata drift: {name}')
 
 
+def verify_application_imports(lock):
+
+    selected = active_distributions()
+    borrowed = lock['runtime']['protected_packages']
+    prefix = Path(sys.prefix).resolve()
+    for name in lock['packages'].keys() - borrowed.keys():
+        dist = selected[name]
+        if not Path(dist.locate_file('')).resolve().is_relative_to(prefix):
+            raise RuntimeError(f'Application distribution is outside the isolated venv: {name}')
+        origins = verified_origins(name, dist)
+        for value in origins.values():
+            paths = value if isinstance(value, list) else [value]
+            if any(not Path(path).is_relative_to(prefix) for path in paths):
+                raise RuntimeError(f'Application import is outside the isolated venv: {name}')
+
+
 def modern_operation(repo, stage, output, *, install=False):
     from packaging.utils import canonicalize_name
     from src.training.environment import check_disk, requirements, profile_path
@@ -373,12 +387,12 @@ def modern_operation(repo, stage, output, *, install=False):
         for name in changes:
             if name.replace('-', '_') in sys.modules:
                 raise RuntimeError(f'{name} is already loaded; restart with a clean kernel')
-        # Catch import names that differ from distribution names, e.g. sklearn.
-        imported = {name.split('.')[0] for name in sys.modules}
-        owners = metadata.packages_distributions()
-        if any(canonicalize_name(owner) in changes for module in imported for owner in owners.get(module, [])):
-            raise RuntimeError('A dependency marked for replacement is already loaded; restart the kernel')
         if changes:
+            # Catch import names that differ from distribution names, e.g. sklearn.
+            selected = active_distributions()
+            for name in changes.keys() & selected.keys():
+                if python_roots(record_files(selected[name])).intersection(sys.modules):
+                    raise RuntimeError(f'{name} is already loaded; restart with a clean kernel')
             with tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / 'wheels.txt'
                 lines = []
@@ -408,5 +422,6 @@ def modern_operation(repo, stage, output, *, install=False):
     if diagnosis['fatal_active'] or diagnosis['introduced']:
         raise RuntimeError(f'Modern dependency conflicts; see {report_file}')
     validate_lock_packages(lock, after)
+    verify_application_imports(lock)
     validate_global_check(report['global_pip_after'], diagnosis, report_file)
     return report

@@ -22,13 +22,19 @@ def main():
     action.add_argument('--resolve-modern-lock', action='store_true')
     action.add_argument('--create-modern-venv', metavar='PATH')
     action.add_argument('--install-modern-lock', action='store_true')
+    action.add_argument('--inspect-modern-distributions', action='store_true')
     args = parser.parse_args()
     profile = selected_profile(args.profile)
     repo = Path(__file__).resolve().parents[1]
-    if args.resolve_modern_lock or args.create_modern_venv or args.install_modern_lock:
+    if (args.resolve_modern_lock or args.create_modern_venv or args.install_modern_lock
+            or args.inspect_modern_distributions):
         if profile != 'MODERN' or args.smoke or args.quantization:
             parser.error('Modern environment actions require MODERN without smoke or quantization')
-        if args.create_modern_venv:
+        if args.inspect_modern_distributions:
+            from src.training.kaggle_distributions import duplicate_report
+            from src.training.modern_environment import canonical_json
+            print(canonical_json(duplicate_report()), end='')
+        elif args.create_modern_venv:
             from src.training.kaggle_isolation import create_modern_venv
             print(create_modern_venv(args.create_modern_venv))
         elif args.resolve_modern_lock:

@@ -1,11 +1,12 @@
 """Create a project-only venv that borrows the image's protected CUDA stack."""
 from collections import defaultdict
-import importlib.metadata as metadata
 import json
 from pathlib import Path
 import sys
 import sysconfig
 import venv
+
+from src.training.kaggle_distributions import active_distributions, record_files, verified_origins
 
 
 BRIDGE_DIR = 'kaggle-image-packages'
@@ -14,16 +15,20 @@ PROVENANCE = 'kaggle-image.json'
 
 def protected_import_paths(distributions, protected):
     """Use wheel RECORD ownership to link complete package directories safely."""
-    from packaging.utils import canonicalize_name
 
     records = defaultdict(list)
-    for dist in distributions:
-        name = canonicalize_name(dist.metadata['Name'] or '')
-        if name in protected and not dist.files:
-            raise RuntimeError(f'Protected package has no file inventory: {name}')
-        for file in dist.files or ():
+    for name, dist in distributions.items():
+        if name in protected:
+            verified_origins(name, dist)
+        files = record_files(dist)
+        root = Path(dist.locate_file('')).resolve()
+        for file in files:
+            if name in protected:
+                actual = Path(dist.locate_file(file)).resolve()
+                if not actual.is_relative_to(root):
+                    raise RuntimeError(f'Protected RECORD points outside its installation: {name}')
             top = file.parts[0]
-            if top in ('.', '..', '__pycache__') or file.is_absolute() or '..' in file.parts:
+            if top == '__pycache__':
                 continue
             path = Path(dist.locate_file(top)).absolute()
             records[path].append((file.parts[1:], name))
@@ -32,6 +37,12 @@ def protected_import_paths(distributions, protected):
         names = {name for _, name in claims}
         if names.isdisjoint(protected):
             return
+        file_owners = defaultdict(set)
+        for parts, name in claims:
+            file_owners[parts].add(name)
+        if any(len(owners) > 1 and not owners.isdisjoint(protected)
+               for owners in file_owners.values()):
+            raise RuntimeError(f'Protected file shares ownership with {sorted(names)}')
         if names <= protected:
             if path.exists():
                 yield path
@@ -68,13 +79,14 @@ def create_modern_venv(destination):
         raise RuntimeError('Choose a new directory under /kaggle/working for the modern venv')
     if sys.prefix != sys.base_prefix:
         raise RuntimeError('Create the modern venv with the Kaggle image interpreter')
-    inventory = package_inventory()
+    selected = active_distributions()
+    inventory = package_inventory(selected)
     borrowed, issues = dependency_graph(inventory, list(protected_packages(inventory)))
     if issues:
         raise RuntimeError(f'The Kaggle image CUDA dependency closure is inconsistent: {issues}')
-    runtime = runtime_identity(inventory, borrowed)
+    runtime = runtime_identity(inventory, borrowed, selected)
     require_target(runtime)
-    links = protected_import_paths(metadata.distributions(), borrowed)
+    links = protected_import_paths(selected, borrowed)
     return create_isolated_venv(destination, links, {'runtime': runtime, 'global_pip': pip_check()})
 
 

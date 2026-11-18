@@ -148,13 +148,18 @@ def validate_environment(repo, stage, output_dir, device='cuda:0', *, smoke=Fals
     minimum_torch = validate_python_runtime('grounding' if profile == 'MODERN' else stage)
     import torch
     from packaging.version import Version
-    validate_torch_build(torch)
+    modern_packages = provenance['effective_lock']['packages'] if provenance else None
+    validate_torch_build(torch, modern_packages['torch']['version'] if modern_packages else None)
     if not Version(minimum_torch) <= Version(torch.__version__.split('+')[0]) < Version('3'):
         raise RuntimeError(f'Require preinstalled torch >={minimum_torch},<3 for this Python; select a compatible image before installing application packages')
     for name, req in requirements(profile_path(repo, stage, profile=profile)).items():
         try:
-            installed = metadata.version(name)
-        except metadata.PackageNotFoundError:
+            if modern_packages is None:
+                installed = metadata.version(name)
+            else:
+                from packaging.utils import canonicalize_name
+                installed = modern_packages[canonicalize_name(name)]['version']
+        except (metadata.PackageNotFoundError, KeyError):
             raise RuntimeError(f'Missing required package: {name}; bootstrap the {stage} profile') from None
         if installed not in req.specifier:
             raise RuntimeError(f'Package mismatch: {name} {installed}; require {req.specifier}')
@@ -166,6 +171,9 @@ def validate_environment(repo, stage, output_dir, device='cuda:0', *, smoke=Fals
         loaded_version = getattr(loaded, '__version__', None)
         if loaded_version and Version(str(loaded_version)) != Version(installed):
             raise RuntimeError(f'Loaded/disk version mismatch for {name}; restart kernel before training')
+    if provenance is not None:
+        from src.training.modern_environment import verify_application_imports
+        verify_application_imports(provenance['effective_lock'])
     try:
         transformers = importlib.import_module('transformers')
         for name in ('PreTrainedModel', 'AutoTokenizer', 'AutoModelForCausalLM',

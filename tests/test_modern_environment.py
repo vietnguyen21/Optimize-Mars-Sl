@@ -94,9 +94,9 @@ class TestModernEnvironment(unittest.TestCase):
             patch.object(modern, 'checked_lock', return_value=(lock, 'digest'))
         ), patch.object(modern, 'pip_check', return_value={'returncode': 0}), (
             patch.object(modern, 'repository_commit', return_value={'commit': 'a' * 40})
-        ), patch.object(modern.metadata, 'packages_distributions', return_value={'sklearn': ['scikit-learn']}), (
-            patch.dict(sys.modules, {'sklearn': object()})
-        ), patch.object(modern, 'report_plan') as resolver:
+        ), patch.object(modern, 'active_distributions', return_value={'scikit-learn': object()}), (
+            patch.object(modern, 'record_files', return_value=[PurePosixPath('sklearn/__init__.py')])
+        ), patch.dict(sys.modules, {'sklearn': object()}), patch.object(modern, 'report_plan') as resolver:
             with self.assertRaisesRegex(RuntimeError, 'already loaded'):
                 modern.modern_operation(ROOT, 'grounding', directory, install=True)
             resolver.assert_not_called()
@@ -113,7 +113,9 @@ class TestModernEnvironment(unittest.TestCase):
             patch.object(modern, 'checked_lock', return_value=(lock, 'digest'))
         ), patch.object(modern, 'pip_check', return_value=diagnostics), (
             patch.object(modern, 'repository_commit', return_value={'commit': 'a' * 40})
-        ), patch.object(modern, 'shared_library_fingerprint', return_value='native'):
+        ), patch.object(modern, 'shared_library_fingerprint', return_value='native'), (
+            patch.object(modern, 'verify_application_imports')
+        ):
             modern.modern_operation(ROOT, 'grounding', directory)
             report = json.loads((Path(directory) / 'modern-preflight.json').read_text())
             self.assertEqual(report['global_pip_after'], diagnostics)
@@ -149,15 +151,17 @@ class TestModernEnvironment(unittest.TestCase):
             (site / 'namespace/other.py').touch()
 
             def dist(name, path):
-                return SimpleNamespace(metadata={'Name': name}, files=[PurePosixPath(path)],
+                return SimpleNamespace(metadata={'Name': name}, files=[PurePosixPath(path)], read_text=lambda _: 'record',
                                        locate_file=lambda value: site / value)
 
             protected = dist('torch', 'namespace/kernels.so')
             unrelated = dist('unrelated', 'namespace/other.py')
-            self.assertEqual(protected_import_paths([protected, unrelated], {'torch'}),
+            self.assertEqual(protected_import_paths({'torch': protected, 'unrelated': unrelated}, {'torch'}),
                              {Path('namespace/kernels.so'): torch_file})
             with self.assertRaisesRegex(RuntimeError, 'shares ownership'):
-                protected_import_paths([protected, dist('unrelated', 'namespace/kernels.so')], {'torch'})
+                protected_import_paths(
+                    {'torch': protected, 'unrelated': dist('unrelated', 'namespace/kernels.so')}, {'torch'},
+                )
 
     def test_normal_process_cannot_install_into_host(self):
         flags = SimpleNamespace(isolated=False, dont_write_bytecode=True)

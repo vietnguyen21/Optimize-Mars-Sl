@@ -76,3 +76,35 @@ The SQLite test computes a mean over 24 queries with a 10 ms threshold. In 30 ba
 Real binary-only pip dry-runs in the local CPU bridge resolved 47 packages with 30 hashed application wheels for core, and 54 packages with 37 hashed application wheels for grounding. Each had zero fatal active and zero introduced conflicts, with no planned protected replacement. The grounding wheels installed via the hash-checked path, isolated `pip check` passed, and a new interpreter imported the locked stack using torch from the source environment. The source environment's separate `pip check` diagnostic recorded existing conflicts. Both resolutions selected SQLGlot wheel `sqlglot-26.16.4-py3-none-any.whl` with SHA-256 `dbff0ace2e21c9169182d6852b8f6eb56d86fc6477354abcb5bda7ab93292975`.
 
 The CPU rehearsal bypassed only the Kaggle runtime eligibility predicate. It still checked bridge fingerprint consistency and wheel hashes. Those locks are local evidence and cannot qualify Kaggle. Re-run both resolutions and locked installs on the actual T4 image, preserve image-wide diagnostics, compare the protected runtime fingerprint and verify synchronized kernels in fresh venv processes. Remaining risks include NVIDIA library layout, any protected dependency version incompatible with the application closure, and the unresolved Kaggle SQLite timing outlier. No pretrained models, private checkpoints, or Frozen B3 data were used.
+
+## M0.3b duplicate distribution metadata
+
+The reported image sees 74 protected distributions and 129 packages in their dependency closure. It exposes system metadata without wheel RECORD for MarkupSafe 2.1.5, NumPy 1.26.4, packaging 24.0, setuptools 68.1.2, and six 1.16.0. The confirmed overlap is six. The local six 1.17.0 owns the imported `/usr/local/lib/python3.13/dist-packages/six.py` and has a wheel RECORD. Scanning every installed distribution made the shadowed 1.16.0 entry fatal. The old inventory also relied on enumeration order. The full set of duplicates on the running image and the status of the other four reported names remain unverified.
+
+M0.3b groups normalized distribution names by `sys.path` location. It picks the highest precedence metadata, verifies that its RECORD owns the discovered and already-loaded import origins for the active closure, and rejects same-location ambiguity or a metadata/import mismatch. The bridge, package inventory, protected fingerprint and modern version checks use that selection. The fingerprint now includes resolved protected import and native-library origins, so capture fresh bridge and lock evidence even on the same image. The base image's SQLGlot stays outside the project venv.
+
+A shadowed RECORD-less package does not block its verified active counterpart. A selected RECORD-less package required by the bridge still blocks qualification. For a genuinely active pure-Python dependency, a future allowlist could source a reviewed, hash-locked wheel into the venv after verifying that the protected closure still resolves. M0.3b does not use that fallback because no active pure-Python package on the target has been shown to need it. A native distribution without verified ownership still fails closed.
+
+### Kaggle qualification commands
+
+Run the first command with the image interpreter in the same session that will create the bridge. The inspection is read-only and reports every duplicate normalized name, version, path rank, RECORD availability, selected entry, and origin verification outcome.
+
+```bash
+mkdir -p /kaggle/working/m03b-evidence
+python -I -B scripts/check_kaggle_environment.py --profile MODERN \
+  --inspect-modern-distributions > /kaggle/working/m03b-evidence/image-duplicates.json
+python -I -B scripts/check_kaggle_environment.py --profile MODERN \
+  --create-modern-venv /kaggle/working/m03b-grounding-venv
+/kaggle/working/m03b-grounding-venv/bin/python -I -B scripts/check_kaggle_environment.py \
+  --profile MODERN --stage grounding --resolve-modern-lock \
+  --output /kaggle/working/m03b-evidence/grounding
+```
+
+Repeat bridge creation and resolution for core with a separate venv and evidence directory. Review the reports and wheel hashes and require zero fatal active conflicts, zero introduced conflicts, and zero protected replacements. For each stage set `KAGGLE_MODERN_LOCK` and `KAGGLE_MODERN_LOCK_SHA256` to the reviewed stage lock and digest. Use the corresponding venv Python with `-I -B` and `--install-modern-lock`, then run preflight in separate processes with `--device cuda:0` and `--device cuda:1`. Preserve both fingerprints and pip diagnostics. Check that the SQLGlot 26.16.4 import resolves inside the venv and the image interpreter still imports 25.20.2.
+
+### M0.3b local evidence
+
+- Dependency-light discovery ran 375 tests. 290 passed and 85 dependency-required tests skipped.
+- The isolated CPU matrix ran 153 tests with 153 passed and zero skips. This includes 9 distribution tests, 12 modern environment tests, 22 legacy environment tests, 4 notebook tests, 34 SQL audit tests, 16 Grounding/System-1 pipeline tests, 25 Grounding tests, 30 grammar/validation tests, and one tiny native Grounding fixture.
+- A local CPU bridge rehearsal resolved core and grounding with 30 and 37 hashed application wheels respectively, zero fatal active and introduced conflicts, and no protected replacement. The Grounding install and locked imports passed. The test harness bypassed the target GPU eligibility predicate only. Neither these locks nor the local duplicate scan certify the Kaggle image.
+- Live duplicate enumeration, corroboration of ownership for the full protected closure, image-bound lock review, and both T4 kernel checks remain required. Same-rank distribution ambiguity, shared file ownership, or a truly active missing native RECORD may still block the live run.
