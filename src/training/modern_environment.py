@@ -1,5 +1,6 @@
 """Image-bound, reviewable Kaggle application dependency plans."""
 import hashlib
+from importlib.machinery import ModuleSpec, PathFinder
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ import sysconfig
 import tempfile
 
 from src.training.kaggle_distributions import (
-    active_distributions, file_sha256, ownership_index, protected_file_plan, python_roots,
+    active_distributions, distribution_groups, file_sha256, ownership_index, protected_file_plan, python_roots,
     record_files, verified_origins,
 )
 
@@ -32,7 +33,7 @@ def package_inventory(distributions=None):
 
 def protected_name(name):
     # packaging is borrowed because the resolver uses it before any install.
-    return name in {'torch', 'torchvision', 'torchaudio', 'triton', 'pytorch-triton', 'packaging'} or (
+    return name in {'torch', 'torchvision', 'torchaudio', 'triton', 'pytorch-triton', 'packaging', 'numpy'} or (
         name.startswith(('nvidia-', 'cuda-', 'cupy-', 'pytorch-triton-', 'jax-cuda', 'cudf-', 'cuml-'))
         or name.endswith(('-cu11', '-cu12', '-cu13'))
     )
@@ -73,18 +74,16 @@ def shared_library_fingerprint(inventory, borrowed=(), distributions=None):
     return sha256(canonical_json({'origins': origins, 'native': native, 'shared': shared}).encode())
 
 
-def runtime_identity(inventory, borrowed=(), distributions=None, *, expected_fingerprint=None):
-    if 'torch' not in inventory:
-        raise RuntimeError('Modern M0 requires the preinstalled Kaggle CUDA torch distribution')
-    selected = active_distributions() if distributions is None else distributions
-    library_fingerprint = shared_library_fingerprint(inventory, borrowed, selected)
-    if expected_fingerprint is not None and library_fingerprint != expected_fingerprint:
-        raise RuntimeError('Isolated runtime differs from the recorded image CUDA fingerprint')
+def runtime_identity(inventory, borrowed, image_sites):
+    from src.training.kaggle_native import mapped_gpu_libraries, native_digest, native_inventory
+
     import torch
     from src.training.environment import validate_torch_build
 
     validate_torch_build(torch, inventory['torch']['version'])
-    verified_origins('torch', selected['torch'], ownership=ownership_index(selected))
+    cuda_available = torch.cuda.is_available()
+    cudnn = torch.backends.cudnn.version()
+    nccl = list(torch.cuda.nccl.version()) if cuda_available and torch.distributed.is_nccl_available() else None
     image = {
         'digest': safe_env('KAGGLE_IMAGE_DIGEST', r'sha256:[a-f0-9]{64}'),
         'build_commit': safe_env('GIT_COMMIT', r'[a-f0-9]{40}'),
@@ -97,25 +96,35 @@ def runtime_identity(inventory, borrowed=(), distributions=None, *, expected_fin
         props = torch.cuda.get_device_properties(index)
         devices.append({'name': props.name, 'capability': [props.major, props.minor],
                         'memory_bytes': props.total_memory})
+    arches = torch.cuda.get_arch_list()
+    mapped = mapped_gpu_libraries()
+    sources = native_inventory(image_sites, mapped)
     driver = command_result(['nvidia-smi', '--query-gpu=driver_version', '--format=csv,noheader'])
     return {
         'python': platform.python_version(), 'abi': sysconfig.get_config_var('SOABI'),
         'machine': platform.machine(), 'libc': list(platform.libc_ver()), 'image': image,
         'torch_build': str(torch.__version__), 'cuda_runtime': torch.version.cuda,
         'driver_versions': sorted(set(driver['stdout'].split())) if driver['returncode'] == 0 else [],
-        'devices': devices, 'torch_arches': torch.cuda.get_arch_list(),
+        'devices': devices, 'torch_arches': arches,
         'protected_packages': protected_packages(inventory, borrowed),
-        'protected_library_fingerprint': library_fingerprint,
+        'cuda_available': cuda_available, 'cudnn_version': cudnn, 'nccl_version': nccl,
+        'native_runtime': {'installed_libraries': sources,
+                           'loaded_libraries': {str(path): native_digest(path) for path in sorted(mapped)},
+                           'wheel_record_integrity': 'unverified_overlapping_image_claims'},
     }
 
 
 def require_target(runtime):
     builds = {'torch': '2.11.0', 'torchvision': '0.26.0', 'torchaudio': '2.11.0', 'triton': '3.6.0'}
     protected = runtime['protected_packages']
+    mapped = [Path(path).name for path in runtime['native_runtime']['loaded_libraries']]
     if (runtime['python'] != '3.13.16' or runtime['machine'] != 'x86_64'
             or not (runtime['abi'] or '').startswith('cpython-313-')
             or runtime['torch_build'] != '2.11.0+cu130' or runtime['cuda_runtime'] != '13.0'
             or not runtime['driver_versions'] or not runtime['image']['kaggle_working_present']
+            or not runtime['cuda_available'] or not runtime['cudnn_version'] or not runtime['nccl_version']
+            or not any(name.startswith('libcudnn.so') for name in mapped)
+            or not any(name.startswith('libnccl.so') for name in mapped)
             or not runtime['devices']
             or any(gpu['capability'] != [7, 5] or 'T4' not in gpu['name'] for gpu in runtime['devices'])
             or any(protected.get(name) not in {version, version + '+cu130'}
@@ -203,19 +212,108 @@ def wheel_record(entry):
     return {'filename': filename, 'sha256': digest}
 
 
+def import_locations(module, paths=None):
+    spec = PathFinder.find_spec(module, paths)
+    if spec is None:
+        return []
+    if spec.origin:
+        return [str(Path(spec.origin).resolve())]
+    return sorted(str(Path(path).resolve()) for path in spec.submodule_search_locations or ())
+
+
+def capture_image_baseline(image_sites, *, enforce_target=True):
+    from src.training.kaggle_isolation import LAYOUT
+
+    selected = active_distributions(distribution_groups(image_sites))
+    inventory = package_inventory(selected)
+    if 'torch' not in inventory or not import_locations('torch', image_sites):
+        raise RuntimeError('Image torch installation is unavailable')
+    runtime = runtime_identity(inventory, (), image_sites)
+    ownership = {path.resolve(): claims for path, claims in ownership_index(selected).items()}
+    observed = set()
+    for module, path in loaded_site_origins(image_sites, sys.modules):
+        claims = ownership.get(path)
+        if not claims:
+            raise RuntimeError(f'No installed image metadata owns runtime import {module}: {path}')
+        observed.update(name for name, _, _ in claims)
+    protected, issues = dependency_graph(inventory, sorted(set(protected_packages(inventory)) | observed))
+    if issues:
+        raise RuntimeError(f'Image CUDA dependency closure is inconsistent: {issues}')
+    modules = {'torch', 'torchvision', 'torchaudio', 'triton', 'nvidia', 'cuda'}
+    for name in protected:
+        modules.update(python_roots(record_files(selected[name])))
+    origins = {name: import_locations(name, image_sites) for name in sorted(modules)}
+    if str(Path(sys.modules['torch'].__file__).resolve()) not in origins['torch']:
+        raise RuntimeError('Loaded torch is outside the original image distribution')
+    runtime['protected_packages'] = protected_packages(inventory, protected)
+    runtime.update(layout=LAYOUT, image_sites=image_sites,
+                   protected_import_origins=origins,
+                   image_sqlglot={'version': inventory.get('sqlglot', {}).get('version'),
+                                  'origins': import_locations('sqlglot', image_sites)})
+    if enforce_target:
+        require_target(runtime)
+        if runtime['image_sqlglot']['version'] != '25.20.2':
+            raise RuntimeError('Expected image SQLGlot 25.20.2 before creating the application overlay')
+    return {'layout': LAYOUT, 'image_sites': image_sites, 'runtime': runtime, 'global_pip': pip_check()}
+
+
+def verify_application_prefix(prefix, image):
+    """Gate the overlay before placing it on sys.path or importing torch."""
+    from src.training.kaggle_native import GPU_LIBRARY
+
+    protected = image['runtime']['protected_packages']
+    reserved = set(image['runtime']['protected_import_origins']) | sys.stdlib_module_names | {
+        'src', 'sitecustomize', 'usercustomize', 'pip',
+    }
+    packages = active_distributions(distribution_groups([str(prefix)]))
+    if any(protected_name(name) or name in protected for name in packages):
+        raise RuntimeError('Application prefix contains a protected distribution')
+    for path in prefix.iterdir():
+        if path.name.split('.')[0] in reserved:
+            raise RuntimeError(f'Application prefix shadows a protected import: {path.name}')
+    claimed = ownership_index(packages)
+    for path in prefix.rglob('*'):
+        has_code = path.suffix in {'.py', '.pyc', '.so'} or '.so.' in path.name
+        if (path.is_symlink() or path.suffix == '.pth' or GPU_LIBRARY.match(path.name)
+                or (has_code and path.is_file() and path not in claimed)):
+            raise RuntimeError(f'Unapproved application prefix file: {path}')
+
+
 def isolated_runtime(inventory):
-    from src.training.kaggle_isolation import BRIDGE_DIR, isolated_image, verify_bridge_files
+    from src.training.kaggle_isolation import activate_application, isolated_image
+    from src.training.kaggle_native import native_digest
 
     image = isolated_image()
     captured = image['runtime']
-    selected = active_distributions()
-    verify_bridge_files(Path(sys.prefix) / BRIDGE_DIR, captured['protected_packages'], ownership_index(selected))
-    runtime = runtime_identity(inventory, captured['protected_packages'], selected,
-                               expected_fingerprint=captured['protected_library_fingerprint'])
-    if runtime != captured:
-        raise RuntimeError('Isolated runtime differs from the recorded image CUDA fingerprint')
-    require_target(runtime)
-    return runtime, image['global_pip']
+    activate_application()
+    current = package_inventory()
+    if protected_packages(current, captured['protected_packages']) != captured['protected_packages']:
+        raise RuntimeError('Protected CUDA distribution inventory changed')
+    for name, origins in captured['protected_import_origins'].items():
+        if import_locations(name) != origins:
+            raise RuntimeError(f'Protected image import origin changed: {name}')
+        loaded = sys.modules.get(name)
+        if loaded is not None:
+            location = vars(loaded).get('__file__')
+            if location and str(Path(location).resolve()) not in origins:
+                raise RuntimeError(f'Loaded protected image import origin changed: {name}')
+    expected = captured['native_runtime']['installed_libraries']
+    if any(not Path(path).is_file() or native_digest(Path(path)) != digest for path, digest in expected.items()):
+        raise RuntimeError('Image native library bytes changed before torch import')
+    rebuilt = capture_image_baseline(image['image_sites'], enforce_target=False)['runtime']
+    if rebuilt != captured:
+        raise RuntimeError('Application runtime differs from the recorded image CUDA fingerprint')
+    require_target(rebuilt)
+    return rebuilt, image['global_pip']
+
+
+def application_diagnosis(before, after, roots, image_owned):
+    diagnosis = classify(before, after, roots)
+    active = set(diagnosis['active_packages'])
+    outside = [issue for issue in diagnosis['introduced'] if issue[0] in image_owned - active]
+    diagnosis['introduced'] = [issue for issue in diagnosis['introduced'] if issue not in outside]
+    diagnosis['excluded_image_conflicts'] = outside
+    return diagnosis
 
 
 def resolve_candidate(repo, stage, output):
@@ -227,8 +325,11 @@ def resolve_candidate(repo, stage, output):
     output.mkdir(parents=True, exist_ok=True)
     profile = profile_path(repo, stage, profile='MODERN')
     roots = sorted(str(req) for req in requirements(profile).values())
+    runtime, image_pip = isolated_runtime(package_inventory())
+    from src.training.kaggle_isolation import APPLICATION_DIR
+    if any((Path(sys.prefix) / APPLICATION_DIR).iterdir()):
+        raise RuntimeError('Resolve into a fresh virtual environment for each stage')
     inventory = package_inventory()
-    runtime, image_pip = isolated_runtime(inventory)
     diagnostics = {'schema_version': 1, 'profile': 'MODERN', 'stage': stage,
                    'runtime': runtime, 'repository': repository_commit(repo),
                    'image_global_pip': image_pip, 'global_pip_before': pip_check()}
@@ -250,24 +351,31 @@ def resolve_candidate(repo, stage, output):
                 raise RuntimeError(f'Resolver plans to replace protected package {name}')
             projected[name] = {'version': package['version'], 'requires_dist': package.get('requires_dist', [])}
             planned[name] = wheel_record(entry)
-        diagnosis = classify(inventory, projected, roots + list(runtime['protected_packages']))
-        diagnostics['conflicts'] = diagnosis
-        (output / 'modern-resolution.json').write_text(canonical_json(diagnostics))
-        if diagnosis['fatal_active'] or diagnosis['introduced']:
-            raise RuntimeError('Resolver introduced conflicts or failed active closure; see modern-resolution.json')
-        active = {name: projected[name] for name in diagnosis['active_packages']}
-        pinned = [f"{name}=={package['version']}" for name, package in active.items()
-                  if name not in protected and name not in planned]
-        if pinned:
-            for entry in report_plan(pip + ['--ignore-installed', '--no-deps', *pinned], report):
+        while True:
+            diagnosis = application_diagnosis(inventory, projected, roots + list(protected), set(inventory))
+            diagnostics['conflicts'] = diagnosis
+            (output / 'modern-resolution.json').write_text(canonical_json(diagnostics))
+            if diagnosis['fatal_active'] or diagnosis['introduced']:
+                raise RuntimeError('Resolver introduced conflicts or failed active closure; see modern-resolution.json')
+            active = {name: projected[name] for name in diagnosis['active_packages']}
+            pending = active.keys() - protected.keys() - planned.keys()
+            if not pending:
+                break
+            # Image distributions may have patched metadata. The overlay
+            # closure must use the exact metadata of the wheel we will install.
+            specs = [f"{name}=={active[name]['version']}" for name in sorted(pending)]
+            fetched = set()
+            for entry in report_plan(pip + ['--ignore-installed', '--no-deps', *specs], report):
                 package = entry['metadata']
                 name = canonicalize_name(package['name'])
-                if sorted(package.get('requires_dist', [])) != sorted(active[name]['requires_dist']):
-                    raise RuntimeError(f'Published wheel metadata differs from installed metadata for {name}')
+                if name not in pending or package['version'] != active[name]['version']:
+                    raise RuntimeError('Exact application wheel resolution changed a requested pin')
+                projected[name] = {'version': package['version'], 'requires_dist': package.get('requires_dist', [])}
                 planned[name] = wheel_record(entry)
-    expected_wheels = {name for name in active if name not in protected}
-    if planned.keys() != expected_wheels:
-        raise RuntimeError('Resolver did not produce wheel hashes for the full application closure')
+                fetched.add(name)
+            if fetched != pending:
+                raise RuntimeError('Resolver did not produce wheel hashes for the full application closure')
+    planned = {name: planned[name] for name in active.keys() - protected.keys()}
     lock = {'schema_version': 1, 'profile': 'MODERN', 'stage': stage, 'roots': roots,
             'runtime': runtime, 'packages': active, 'wheels': planned}
     path = output / 'modern.lock.json'
@@ -282,8 +390,17 @@ def pip_install_command():
             'install', '--no-compile', '--only-binary=:all:']
 
 
-def pip_check():
-    return command_result([sys.executable, '-I', '-B', '-m', 'pip', 'check'])
+def pip_check(*, application=False):
+    from src.training.kaggle_isolation import APPLICATION_DIR
+
+    command = [sys.executable, '-I', '-B']
+    prefix = str(Path(sys.prefix) / APPLICATION_DIR)
+    if application and prefix in sys.path:
+        command += ['-c', 'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); '
+                    'runpy.run_module("pip", run_name="__main__")', prefix, 'check']
+    else:
+        command += ['-m', 'pip', 'check']
+    return command_result(command)
 
 
 def validate_global_check(result, diagnosis, report_file):
@@ -291,12 +408,13 @@ def validate_global_check(result, diagnosis, report_file):
 
     if result['returncode'] == 0:
         return
-    unrelated_owners = {issue[0] for issue in diagnosis['unrelated_preinstalled']}
+    unrelated_owners = {issue[0] for issue in diagnosis['unrelated_preinstalled']
+                        + diagnosis.get('excluded_image_conflicts', [])}
     owners = {canonicalize_name(line.split()[0])
               for line in result['stdout'].splitlines() if line.strip()}
     if result['returncode'] != 1 or not owners or not owners <= unrelated_owners:
         raise RuntimeError(f'Unclassified pip check failure; see {report_file}')
-    print(f'Unrelated preinstalled conflicts reported by pip check; full diagnostics in {report_file}')
+    print(f'Image conflicts outside the application closure; full pip diagnostics in {report_file}')
 
 
 def checked_lock(repo, stage, runtime):
@@ -333,12 +451,17 @@ def validate_lock_packages(lock, inventory):
 
 
 def verify_application_imports(lock):
+    from src.training.kaggle_isolation import APPLICATION_DIR
 
     selected = active_distributions()
     borrowed = lock['runtime']['protected_packages']
-    prefix = Path(sys.prefix).resolve()
+    prefix = (Path(sys.prefix) / APPLICATION_DIR).resolve()
+    expected = lock['packages'].keys() - borrowed.keys()
+    if set(distribution_groups([str(prefix)])) != expected:
+        raise RuntimeError('Application prefix contains packages outside the reviewed lock')
     ownership = ownership_index(selected)
-    for name in lock['packages'].keys() - borrowed.keys():
+    observed = {}
+    for name in expected:
         dist = selected[name]
         if not Path(dist.locate_file('')).resolve().is_relative_to(prefix):
             raise RuntimeError(f'Application distribution is outside the isolated venv: {name}')
@@ -346,12 +469,122 @@ def verify_application_imports(lock):
         for value in origins.values():
             paths = value if isinstance(value, list) else [value]
             if any(not Path(path).is_relative_to(prefix) for path in paths):
-                raise RuntimeError(f'Application import is outside the isolated venv: {name}')
+                raise RuntimeError(f'Application import is outside the application prefix: {name}')
+        observed[name] = {'version': dist.version, 'module_roots': {
+            module: value for module, value in origins.items() if '.' not in module
+        }}
+    return observed
+
+
+def loaded_site_origins(sites, modules):
+    roots = tuple(Path(path) for path in sites)
+    for name, module in list(modules.items()):
+        location = getattr(module, '__dict__', {}).get('__file__')
+        if location:
+            path = Path(location).resolve()
+            if any(path.is_relative_to(site) for site in roots):
+                yield name, path
+
+
+def reviewed_image_files(lock):
+    selected = active_distributions()
+    approved = set(lock['packages'])
+    ownership = ownership_index({name: dist for name, dist in selected.items() if name in approved})
+    return {path.resolve() for path in ownership}
+
+
+class ReviewedImageFinder:
+    """Keep unreviewed image packages out of normal optional import discovery."""
+
+    def __init__(self, sites, files):
+        self.sites = tuple(Path(site) for site in sites)
+        self.files = files
+        self.directories = {parent for file in files for parent in file.parents}
+
+    def permits(self, path, approved):
+        path = Path(path).resolve()
+        return not any(path.is_relative_to(site) for site in self.sites) or path in approved
+
+    def find_distributions(self, context):
+        # PathFinder also exposes the installed distribution metadata;
+        # dependency/version probes still need the shared image inventory.
+        return PathFinder.find_distributions(context)
+
+    def find_spec(self, fullname, path=None, target=None):
+        spec = PathFinder.find_spec(fullname, path, target)
+        if spec is None:
+            return None
+        if spec.origin:
+            return spec if self.permits(spec.origin, self.files) else None
+        locations = list(spec.submodule_search_locations or ())
+        allowed = [entry for entry in locations if self.permits(entry, self.directories)]
+        if allowed == locations:
+            return spec
+        if not allowed:
+            return None
+        narrowed = ModuleSpec(fullname, loader=None, is_package=True)
+        narrowed.submodule_search_locations = allowed
+        return narrowed
+
+
+def restrict_image_imports(lock):
+    finder = ReviewedImageFinder(lock['runtime']['image_sites'], reviewed_image_files(lock))
+    for index, current in enumerate(sys.meta_path):
+        if current is PathFinder or isinstance(current, ReviewedImageFinder):
+            sys.meta_path[index] = finder
+            return
+    raise RuntimeError('Cannot guard application imports without the standard filesystem finder')
+
+
+def verify_loaded_image_imports(lock, modules=None):
+    """Reject ambient image imports, including imports that bypass the guard."""
+    modules = sys.modules if modules is None else modules
+    allowed = reviewed_image_files(lock)
+    for name, path in loaded_site_origins(lock['runtime']['image_sites'], modules):
+        if path not in allowed:
+            raise RuntimeError(f'Unexpected image dependency imported outside the reviewed closure: {name} ({path})')
+
+
+def install_application_wheels(lock, digest, changes):
+    from src.training.kaggle_isolation import APPLICATION_DIR, APPLICATION_RECEIPT, isolated_image
+    from packaging.utils import canonicalize_name
+
+    prefix = Path(sys.prefix) / APPLICATION_DIR
+    if any(prefix.iterdir()):
+        raise RuntimeError('Create a fresh venv to install a different application lock')
+    image = isolated_image()
+    with tempfile.TemporaryDirectory(dir=sys.prefix) as directory:
+        staged = Path(directory) / 'wheels'
+        staged.mkdir()
+        path = Path(directory) / 'wheels.txt'
+        lines = []
+        for name, package in sorted(changes.items()):
+            wheel = lock['wheels'][name]
+            if not re.fullmatch(r'[a-f0-9]{64}', wheel['sha256']):
+                raise RuntimeError(f'Invalid wheel hash for {name}')
+            lines.append(f"{name}=={package['version']} --hash=sha256:{wheel['sha256']}\n")
+        path.write_text(''.join(lines))
+        pip = pip_install_command() + ['--require-hashes', '--no-deps', '--ignore-installed',
+                                       '--target', str(staged), '-r', str(path)]
+        entries = report_plan(pip, Path(directory) / 'verified.json')
+        resolved = {canonicalize_name(entry['metadata']['name']): wheel_record(entry) for entry in entries}
+        if resolved != {name: lock['wheels'][name] for name in changes}:
+            raise RuntimeError('Hashed dry-run disagrees with reviewed lock')
+        run_pip_install(pip)
+        verify_application_prefix(staged, image)
+        actual = package_inventory(active_distributions(distribution_groups([str(staged)])))
+        if set(actual) != set(changes) or any(
+                actual[name]['version'] != expected['version']
+                or sorted(actual[name]['requires_dist']) != sorted(expected['requires_dist'])
+                for name, expected in changes.items()):
+            raise RuntimeError('Staged application wheel metadata differs from reviewed lock')
+        staged.replace(prefix)
+    (Path(sys.prefix) / APPLICATION_RECEIPT).write_text(digest + '\n')
 
 
 def modern_operation(repo, stage, output, *, install=False):
-    from packaging.utils import canonicalize_name
     from src.training.environment import check_disk, requirements, profile_path
+    from src.training.kaggle_isolation import APPLICATION_DIR, APPLICATION_RECEIPT
 
     # Validate the requested stage before probing CUDA or reading an operator lock.
     requirements(profile_path(repo, stage, profile='MODERN'))
@@ -360,9 +593,11 @@ def modern_operation(repo, stage, output, *, install=False):
     output.mkdir(parents=True, exist_ok=True)
     check_disk(output, 0)
     runtime, image_pip = isolated_runtime(before)
+    before = package_inventory()
+    image_owned = {name for name in distribution_groups(runtime['image_sites'])} if 'layout' in runtime else set()
     report = {'schema_version': 1, 'profile': 'MODERN', 'stage': stage, 'runtime': runtime,
               'repository': repository_commit(repo),
-              'image_global_pip': image_pip, 'global_pip_before': pip_check()}
+              'image_global_pip': image_pip, 'global_pip_before': pip_check(application=True)}
     report_file = output / ('modern-bootstrap.json' if install else 'modern-preflight.json')
 
     def save():
@@ -374,58 +609,53 @@ def modern_operation(repo, stage, output, *, install=False):
     save()
     if not report['repository']['commit']:
         raise RuntimeError('Repository commit unavailable; set KAGGLE_REPO_COMMIT for an attached snapshot')
+    borrowed = runtime['protected_packages']
+    prefix = Path(sys.prefix) / APPLICATION_DIR
+    receipt = Path(sys.prefix) / APPLICATION_RECEIPT
+    overlay = 'layout' in runtime
+    if overlay and receipt.is_file() and receipt.read_text().strip() != digest:
+        raise RuntimeError('Application installation receipt differs from the reviewed lock')
+    roots = lock['roots'] + list(borrowed)
     if install:
         projected = dict(before)
         projected.update(lock['packages'])
         validate_lock_packages(lock, projected)
-        diagnosis = classify(before, projected, lock['roots'] + list(runtime['protected_packages']))
+        diagnosis = application_diagnosis(before, projected, roots, image_owned)
         report['projected_conflicts'] = diagnosis
         save()
         if diagnosis['fatal_active'] or diagnosis['introduced']:
             raise RuntimeError('Modern installation would introduce dependency conflicts')
-        changes = {name: package for name, package in lock['packages'].items() if name not in before
-                   or before[name]['version'] != package['version']
-                   or sorted(before[name]['requires_dist']) != sorted(package['requires_dist'])}
-        if any(protected_name(name) or name in runtime['protected_packages'] for name in changes):
+        changes = {name: package for name, package in lock['packages'].items() if name not in borrowed}
+        if any(protected_name(name) for name in changes):
             raise RuntimeError('Modern installation would replace a protected distribution')
-        for name in changes:
-            if name.replace('-', '_') in sys.modules:
-                raise RuntimeError(f'{name} is already loaded; restart with a clean kernel')
-        if changes:
-            # Catch import names that differ from distribution names, e.g. sklearn.
+        if changes and not (overlay and receipt.is_file()):
             selected = active_distributions()
-            for name in changes.keys() & selected.keys():
-                if python_roots(record_files(selected[name])).intersection(sys.modules):
+            for name in changes:
+                if (name.replace('-', '_') in sys.modules or
+                        (name in selected and python_roots(record_files(selected[name])).intersection(sys.modules))):
                     raise RuntimeError(f'{name} is already loaded; restart with a clean kernel')
-            with tempfile.TemporaryDirectory() as tmp:
-                path = Path(tmp) / 'wheels.txt'
-                lines = []
-                for name, package in sorted(changes.items()):
-                    wheel = lock['wheels'][name]
-                    if not re.fullmatch(r'[a-f0-9]{64}', wheel['sha256']):
-                        raise RuntimeError(f'Invalid wheel hash for {name}')
-                    lines.append(f"{name}=={package['version']} --hash=sha256:{wheel['sha256']}\n")
-                path.write_text(''.join(lines))
-                pip = pip_install_command() + [
-                    '--require-hashes', '--no-deps', '--force-reinstall', '-r', str(path),
-                ]
-                entries = report_plan(pip, Path(tmp) / 'verified.json')
-                resolved = {canonicalize_name(entry['metadata']['name']): wheel_record(entry) for entry in entries}
-                if resolved != {name: lock['wheels'][name] for name in changes}:
-                    raise RuntimeError('Hashed dry-run disagrees with reviewed lock')
-                run_pip_install(pip)
+            install_application_wheels(lock, digest, changes)
+    if overlay and (not receipt.is_file() or str(prefix) not in sys.path):
+        raise RuntimeError('Install the reviewed application lock in the controlled venv first')
     after = package_inventory()
-    report['global_pip_after'] = pip_check()
-    report['conflicts'] = classify(before, after, lock['roots'] + list(runtime['protected_packages']))
+    report['global_pip_after'] = pip_check(application=True)
+    report['conflicts'] = application_diagnosis(before, after, roots, image_owned)
     save()
-    borrowed = runtime['protected_packages']
-    if (protected_packages(after, borrowed) != borrowed
-            or shared_library_fingerprint(after, borrowed) != runtime['protected_library_fingerprint']):
+    if protected_packages(after, borrowed) != borrowed:
         raise RuntimeError('Protected CUDA distribution inventory changed')
+    if overlay:
+        isolated_runtime(after)
     diagnosis = report['conflicts']
     if diagnosis['fatal_active'] or diagnosis['introduced']:
         raise RuntimeError(f'Modern dependency conflicts; see {report_file}')
     validate_lock_packages(lock, after)
-    verify_application_imports(lock)
+    report['application_import_origins'] = verify_application_imports(lock)
+    save()
     validate_global_check(report['global_pip_after'], diagnosis, report_file)
+    if overlay:
+        verify_loaded_image_imports(lock)
+        # Installation and preflight use separate launch processes. Only the
+        # ready application process needs its optional imports restricted.
+        if not install:
+            restrict_image_imports(lock)
     return report

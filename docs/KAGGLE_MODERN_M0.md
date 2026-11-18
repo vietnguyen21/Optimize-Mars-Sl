@@ -1,5 +1,7 @@
 # M0 Kaggle environment qualification
 
+Use the [M0.4 environment contract and commands](#m04-image-owned-runtime-and-application-overlay) for the current implementation. Earlier qualification instructions document the retired file bridge.
+
 `KAGGLE_PROFILE=LEGACY` is the default and retains the original profiles, bootstrap and experiment paths. `KAGGLE_PROFILE=MODERN` explicitly selects the new core or grounding candidate. Notebook 01 stops after environment preflight in MODERN mode, before checkpoint initialization or dataset preparation. Modern stages 02–05 are unavailable. M0 changes environment wiring only.
 
 ## Version matrix
@@ -152,3 +154,78 @@ Check that torch and libnvcomp resolve to the original image files and SQLGlot 2
 - Dependency-light discovery ran 380 tests with 295 passed and 85 dependency-required skips.
 - The isolated CPU regression matrix passed all 158 tests with zero skips, including 14 distribution ownership tests and the existing modern, legacy, and notebook suites.
 - A fresh file-level CPU bridge completed both binary-only resolves with zero fatal active conflicts, zero introduced conflicts, and zero protected replacements. Core resolved 30 hashed application wheels and Grounding 37. The hash-checked Grounding install passed, isolated pip check was clean, and a fresh interpreter loaded torch from its original environment and SQLGlot 26.16.4 from the venv. The CPU harness bypassed Kaggle runtime eligibility only. These locks are local evidence.
+
+## M0.4 image-owned runtime and application overlay
+
+The live image reported 68 files with multiple RECORD owners. The strict bridge accepted one and rejected 67, including `nvidia/__init__.py`, 22 cuDNN files, and 44 NCCL files. The conflicts span CUDA 12 and CUDA 13 distribution metadata pointing to the same paths. Retire the bridge on this image and keep CUDA, PyTorch, cuDNN, and NCCL at the image's original locations. The read-only ownership inspector remains available for diagnostics.
+
+The launcher uses a system-site-packages venv plus a separate `application-wheels/` prefix. It preserves the image-owned numerical stack and dependencies loaded while inspecting torch, then gives the approved application wheels import precedence. Image packages remain visible. The application prefix is the installation boundary and is not a fully isolated Python environment. The launcher hides image modules outside the reviewed dependency closure from normal optional import discovery. Preflight also rejects any such module that bypasses the guard and loads.
+
+- Capture the image interpreter's original SQLGlot version and origin, exact protected versions, CUDA availability and device inventory, cuDNN/NCCL versions, and SHA-256 for the installed and mapped native library files. Check loaded libraries through Linux `/proc/self/maps` before approval and again after kernel and optional collective probes. The runtime reports wheel RECORD integrity as `unverified_overlapping_image_claims`. Its byte fingerprints describe installed image files rather than agreement between wheel owners.
+- Resolve CORE and Grounding in fresh, separate application venvs. For each lock, retain exact image-owned versions and exact application wheel metadata and hashes. Install via binary-only hash-checked pip into a staging directory under the venv, then publish to its application prefix. The launcher adds that directory as a plain import path, so `.pth` startup code is not executed. Reject executable files without wheel ownership, GPU/stdlib import shadows, CUDA-native filenames, and symlinks in the application prefix.
+- Grounding uses SQLGlot 26.16.4 and Sentence Transformers 5.3.0 from the reviewed application wheels. The original image interpreter keeps SQLGlot 25.20.2. The report keeps image-wide pip failures and out-of-closure conflicts separate from fatal active dependencies or newly broken application dependencies. For example, Ibis's SQLGlot requirement can conflict in the overlay process where Ibis is visible. Loading Ibis then fails the import audit. Notebook 01 remains preflight-only in MODERN mode.
+
+### Image-bound qualification
+
+From the migration checkout, run the first commands with the image interpreter. Keep the evidence directory separate from training output.
+
+```bash
+EVIDENCE=/kaggle/working/m04-evidence
+IMAGE_PYTHON=$(command -v python)
+CLI=scripts/check_kaggle_environment.py
+"$IMAGE_PYTHON" -I -B "$CLI" --profile MODERN --capture-image-baseline --output "$EVIDENCE/before"
+"$IMAGE_PYTHON" -I -B -c 'import sqlglot; assert sqlglot.__version__ == "25.20.2"; print(sqlglot.__version__, sqlglot.__file__)' \
+  > "$EVIDENCE/before/sqlglot.txt"
+for stage in core grounding; do
+  root="/kaggle/working/m04-$stage-venv"
+  "$IMAGE_PYTHON" -I -B "$CLI" --profile MODERN --create-modern-venv "$root" \
+    --output "$EVIDENCE/$stage/source"
+  "$root/bin/python" -I -B "$CLI" --profile MODERN --stage "$stage" \
+    --resolve-modern-lock --output "$EVIDENCE/$stage/lock"
+done
+```
+
+Review each `modern-resolution.json` and `modern.lock.json`. Require zero `fatal_active`, zero `introduced`, no protected replacements, and a hash for every application wheel. Review `excluded_image_conflicts` separately. Confirm the image baseline reports actual mapped cuDNN and NCCL and marks overlapping wheel RECORD claims unverified. Use each reviewed digest explicitly. For Grounding, run the following and repeat the install/preflight with CORE's own venv and lock.
+
+```bash
+export KAGGLE_MODERN_LOCK="$EVIDENCE/grounding/lock/modern.lock.json"
+export KAGGLE_MODERN_LOCK_SHA256='<reviewed Grounding lock SHA-256>'
+APP=/kaggle/working/m04-grounding-venv/bin/python
+"$APP" -I -B "$CLI" --profile MODERN --stage grounding \
+  --install-modern-lock --output "$EVIDENCE/grounding/installed"
+for device in cuda:0 cuda:1; do
+  "$APP" -I -B "$CLI" --profile MODERN --stage grounding --device "$device" \
+    --output "$EVIDENCE/grounding/preflight-$device"
+done
+"$IMAGE_PYTHON" -I -B "$CLI" --profile MODERN --capture-image-baseline --output "$EVIDENCE/after"
+"$IMAGE_PYTHON" -I -B -c 'import sqlglot; assert sqlglot.__version__ == "25.20.2"; print(sqlglot.__version__, sqlglot.__file__)' \
+  > "$EVIDENCE/after/sqlglot.txt"
+cmp "$EVIDENCE/before/image-baseline.json" "$EVIDENCE/after/image-baseline.json"
+cmp "$EVIDENCE/before/sqlglot.txt" "$EVIDENCE/after/sqlglot.txt"
+```
+
+Require the bootstrap/preflight reports to show SQLGlot 26.16.4 within `application-wheels/`, torch at the image origin, and an unchanged native fingerprint. Require the original image baseline to show SQLGlot 25.20.2 both times. The two kernel reports record synchronized backward results and mapped-library evidence. When both T4s and NCCL are available, use the same reviewed Grounding lock for this optional two-rank all-reduce. Both rank reports must record a result of 3 and image-owned library hashes.
+
+```bash
+"$APP" -I -B -m torch.distributed.run --standalone --nproc-per-node=2 --no-python \
+  "$APP" -I -B scripts/probe_kaggle_nccl.py "$EVIDENCE/grounding/nccl"
+```
+
+Repeat SQLite timing on the running Kaggle host using the original image Python and one CPU from its allowed affinity. Keep the original 10 ms threshold. Capture the SQLite version, CPU affinity, and any failure.
+
+```bash
+"$IMAGE_PYTHON" -B -c 'import sqlite3, os; print(sqlite3.sqlite_version, sorted(os.sched_getaffinity(0)))'
+CPU=$("$IMAGE_PYTHON" -B -c 'import os; print(min(os.sched_getaffinity(0)))')
+for repeat in $(seq 1 30); do
+  taskset -c "$CPU" "$IMAGE_PYTHON" -B -m unittest \
+    tests.test_grounding.TestMiniBirdDatabaseQueries.test_execute_all_24_queries_on_sqlite || break
+done
+```
+
+Outstanding live risks are CUDA loader behavior, lazy mapped dependencies, optional imports from outside the active closure, and the image-dependent SQLite timing outlier. Hashing GPU native files adds disk reads on fresh processes. The live image, image-bound locks, CUDA kernels, NCCL collective, and SQLite timing are unqualified by local CPU tests.
+
+### M0.4 local validation
+
+- Existing CPU regression matrix: 158 passed, zero skipped. Eight additional application-runtime contracts passed in the same run, covering SQLGlot process separation, protected shadowing, mapped-library file identity and hash drift, and visibility conflicts outside the closure.
+- Dependency-light discovery: 388 tests, 303 passed, 85 dependency-required skips. The pinned-CPU SQLite test passed 30 of 30 on SQLite 3.54.1.
+- A Linux CPU rehearsal retained torch 2.15.0+cpu in its original source directory. CORE and Grounding produced 28 and 35 hashed application wheels respectively. Both resolves found zero fatal active and zero introduced conflicts. Two existing unrelated image conflicts remained visible. The Grounding overlay installed with hash checks. The rehearsal bypassed Kaggle GPU eligibility and does not qualify the live image.

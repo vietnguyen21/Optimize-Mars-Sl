@@ -131,12 +131,15 @@ class TestKaggleDistributions(unittest.TestCase):
         self.assertEqual(problems, [('example', 'absent>=1', '<missing>')])
 
     def test_image_fingerprint_drift_remains_fatal(self):
-        captured = {'protected_packages': {}, 'protected_library_fingerprint': 'before'}
+        captured = {'protected_packages': {}, 'protected_import_origins': {},
+                    'native_runtime': {'installed_libraries': {}}}
+        image = {'runtime': captured, 'image_sites': []}
         with (
-            patch('src.training.kaggle_isolation.isolated_image', return_value={'runtime': captured}),
-            patch('src.training.kaggle_isolation.verify_bridge_files'),
-            patch('src.training.modern_environment.runtime_identity',
-                  return_value=dict(captured, protected_library_fingerprint='after')),
+            patch('src.training.kaggle_isolation.isolated_image', return_value=image),
+            patch('src.training.kaggle_isolation.activate_application'),
+            patch('src.training.modern_environment.package_inventory', return_value={}),
+            patch('src.training.modern_environment.capture_image_baseline',
+                  return_value={'runtime': dict(captured, changed=True)}),
         ):
             with self.assertRaisesRegex(RuntimeError, 'CUDA fingerprint'):
                 isolated_runtime({})

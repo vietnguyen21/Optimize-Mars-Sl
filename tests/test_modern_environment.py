@@ -114,7 +114,7 @@ class TestModernEnvironment(unittest.TestCase):
         ), patch.object(modern, 'pip_check', return_value=diagnostics), (
             patch.object(modern, 'repository_commit', return_value={'commit': 'a' * 40})
         ), patch.object(modern, 'shared_library_fingerprint', return_value='native'), (
-            patch.object(modern, 'verify_application_imports')
+            patch.object(modern, 'verify_application_imports', return_value={})
         ):
             modern.modern_operation(ROOT, 'grounding', directory)
             report = json.loads((Path(directory) / 'modern-preflight.json').read_text())

@@ -216,6 +216,13 @@ def validate_environment(repo, stage, output_dir, device='cuda:0', *, smoke=Fals
             del layer, x
             report['nf4_kernel'] = 'passed'
     if provenance is not None:
-        report.update(profile=profile, lock_sha256=provenance['lock_sha256'])
+        from src.training.kaggle_native import verify_mapped_libraries
+        from src.training.modern_environment import verify_loaded_image_imports, canonical_json
+
+        verify_loaded_image_imports(provenance['effective_lock'])
+        report.update(profile=profile, lock_sha256=provenance['lock_sha256'],
+                      kernel_probe='synchronized_backward_finite',
+                      loaded_image_libraries=verify_mapped_libraries(provenance['runtime']['native_runtime']))
+        (output / f'modern-{str(device).replace(":", "-")}-kernels.json').write_text(canonical_json(report))
     print(json.dumps(report))
     return report

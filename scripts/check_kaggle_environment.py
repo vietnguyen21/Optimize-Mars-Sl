@@ -21,6 +21,7 @@ def main():
     action = parser.add_mutually_exclusive_group()
     action.add_argument('--resolve-modern-lock', action='store_true')
     action.add_argument('--create-modern-venv', metavar='PATH')
+    action.add_argument('--capture-image-baseline', action='store_true')
     action.add_argument('--install-modern-lock', action='store_true')
     action.add_argument('--inspect-modern-distributions', action='store_true')
     action.add_argument('--inspect-modern-file', metavar='RECORD_PATH')
@@ -28,7 +29,7 @@ def main():
     profile = selected_profile(args.profile)
     repo = Path(__file__).resolve().parents[1]
     if (args.resolve_modern_lock or args.create_modern_venv or args.install_modern_lock
-            or args.inspect_modern_distributions or args.inspect_modern_file):
+            or args.inspect_modern_distributions or args.inspect_modern_file or args.capture_image_baseline):
         if profile != 'MODERN' or args.smoke or args.quantization:
             parser.error('Modern environment actions require MODERN without smoke or quantization')
         if args.inspect_modern_distributions:
@@ -39,9 +40,11 @@ def main():
             from src.training.kaggle_distributions import inspect_record_claims
             from src.training.modern_environment import canonical_json
             print(canonical_json(inspect_record_claims(args.inspect_modern_file)), end='')
-        elif args.create_modern_venv:
+        elif args.create_modern_venv or args.capture_image_baseline:
             from src.training.kaggle_isolation import create_modern_venv
-            print(create_modern_venv(args.create_modern_venv))
+            python = create_modern_venv(args.create_modern_venv, baseline_output=args.output)
+            if python:
+                print(python)
         elif args.resolve_modern_lock:
             from src.training.modern_environment import resolve_candidate
             resolve_candidate(repo, args.stage, args.output)

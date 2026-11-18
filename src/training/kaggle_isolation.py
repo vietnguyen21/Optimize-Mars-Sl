@@ -2,7 +2,6 @@
 import json
 from pathlib import Path
 import sys
-import sysconfig
 import venv
 
 from src.training.kaggle_distributions import (
@@ -10,12 +9,14 @@ from src.training.kaggle_distributions import (
 )
 
 
-BRIDGE_DIR = 'kaggle-image-packages'
+APPLICATION_DIR = 'application-wheels'
+APPLICATION_RECEIPT = 'application-lock.sha256'
+LAYOUT = 'image-runtime-application-overlay-v1'
 PROVENANCE = 'kaggle-image.json'
 
 
 def protected_import_paths(distributions, protected):
-    """Expose only authorized files, preserving their relative wheel layout."""
+    """Run the retired bridge's strict ownership diagnostic without linking files."""
     ownership = ownership_index(distributions)
     for name in protected:
         verified_origins(name, distributions[name], ownership=ownership, allowed=protected)
@@ -30,55 +31,64 @@ def verify_bridge_files(bridge, protected, ownership):
         raise RuntimeError('Protected bridge has missing or unauthorized files')
 
 
-def create_modern_venv(destination):
-    from src.training.modern_environment import (
-        dependency_graph, package_inventory, pip_check, protected_packages,
-        require_target, runtime_identity,
-    )
+def image_site_paths():
+    return list(dict.fromkeys(str(Path(entry).resolve()) for entry in sys.path if entry and
+                             Path(entry).name in {'site-packages', 'dist-packages'}))
 
-    destination = Path(destination).resolve()
-    if not destination.is_relative_to(Path('/kaggle/working')) or destination.exists():
+
+def create_modern_venv(destination, *, baseline_output=None):
+    from src.training.modern_environment import capture_image_baseline, canonical_json
+
+    if not (sys.flags.isolated and sys.flags.dont_write_bytecode) or sys.prefix != sys.base_prefix:
+        raise RuntimeError('Capture the image with the Kaggle interpreter using -I -B')
+    destination = Path(destination).resolve() if destination else None
+    if destination and (not destination.is_relative_to(Path('/kaggle/working')) or destination.exists()):
         raise RuntimeError('Choose a new directory under /kaggle/working for the modern venv')
-    if sys.prefix != sys.base_prefix:
-        raise RuntimeError('Create the modern venv with the Kaggle image interpreter')
-    selected = active_distributions()
-    inventory = package_inventory(selected)
-    borrowed, issues = dependency_graph(inventory, list(protected_packages(inventory)))
-    if issues:
-        raise RuntimeError(f'The Kaggle image CUDA dependency closure is inconsistent: {issues}')
-    links = protected_import_paths(selected, borrowed)
-    runtime = runtime_identity(inventory, borrowed, selected)
-    require_target(runtime)
-    return create_isolated_venv(destination, links, {'runtime': runtime, 'global_pip': pip_check()})
+    image = capture_image_baseline(image_site_paths())
+    if baseline_output:
+        path = Path(baseline_output)
+        path.mkdir(parents=True, exist_ok=True)
+        (path / 'image-baseline.json').write_text(canonical_json(image))
+    if destination:
+        return create_application_venv(destination, image)
+    return None
 
 
-def create_isolated_venv(destination, links, provenance):
+def create_application_venv(destination, image):
     from src.training.modern_environment import canonical_json
 
     destination.mkdir(parents=True)
-    venv.EnvBuilder(with_pip=True).create(destination)
-    bridge = destination / BRIDGE_DIR
-    bridge.mkdir()
-    for name, source in links.items():
-        link = bridge / name
-        link.parent.mkdir(parents=True, exist_ok=True)
-        link.symlink_to(source)
-    site = Path(sysconfig.get_path('purelib', scheme='venv', vars={'base': str(destination)}))
-    (site / 'kaggle-image.pth').write_text(str(bridge) + '\n')
-    (destination / PROVENANCE).write_text(canonical_json(provenance))
+    venv.EnvBuilder(with_pip=True, system_site_packages=True).create(destination)
+    (destination / APPLICATION_DIR).mkdir()
+    (destination / PROVENANCE).write_text(canonical_json(image))
     return destination / 'bin' / 'python'
 
 
 def isolated_image():
-    """Reject base Python, inherited image site-packages and warm kernels."""
+    """Require the controlled interpreter. Image packages remain visible."""
     prefix = Path(sys.prefix)
     provenance = prefix / PROVENANCE
-    bridge = prefix / BRIDGE_DIR
     if not (sys.flags.isolated and sys.flags.dont_write_bytecode and sys.prefix != sys.base_prefix
-            and provenance.is_file() and str(bridge) in sys.path):
-        raise RuntimeError('Run modern environment operations with the Kaggle venv Python using -I -B')
-    for entry in sys.path:
-        path = Path(entry)
-        if {'site-packages', 'dist-packages'} & set(path.parts) and not path.is_relative_to(prefix):
-            raise RuntimeError('The modern venv inherits an external package directory')
-    return json.loads(provenance.read_text())
+            and provenance.is_file() and (prefix / APPLICATION_DIR).is_dir()):
+        raise RuntimeError('Run modern environment operations with the Kaggle application venv Python using -I -B')
+    image = json.loads(provenance.read_text())
+    if image.get('layout') != LAYOUT:
+        raise RuntimeError('Recreate this venv using the image-runtime application layout')
+    actual = [site for site in image_site_paths() if not Path(site).is_relative_to(prefix.resolve())]
+    if actual != image['image_sites']:
+        raise RuntimeError('Visible image site-packages differ from the captured interpreter')
+    return image
+
+
+def activate_application():
+    """Add the approved prefix as a plain import path, without executing .pth files."""
+    image = isolated_image()
+    application = Path(sys.prefix) / APPLICATION_DIR
+    from src.training.modern_environment import verify_application_prefix
+
+    if any(application.iterdir()) and not (Path(sys.prefix) / APPLICATION_RECEIPT).is_file():
+        raise RuntimeError('Application prefix has files without a reviewed installation receipt')
+    verify_application_prefix(application, image)
+    if str(application) not in sys.path:
+        sys.path.insert(0, str(application))
+    return image
