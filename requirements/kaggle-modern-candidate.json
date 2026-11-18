@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "status": "pending_running_kaggle_qualification",
+  "target": {
+    "python": "3.13.16",
+    "machine": "x86_64",
+    "torch_build": "2.11.0+cu130",
+    "torchvision": "0.26.0+cu130",
+    "torchaudio": "2.11.0+cu130",
+    "triton": "3.6.0",
+    "cuda_runtime": "13.0",
+    "gpu": "NVIDIA Tesla T4",
+    "compute_capability": [7, 5]
+  },
+  "root_inputs_sha256": {
+    "kaggle-modern-core.txt": "48ac4e4831b28c9ff4609074535696f701e971b0042434d40ffca7f2ae088583",
+    "kaggle-modern-grounding.txt": "308dda093176fe177ff498434fcce0ee5064079186965e38868add27cee202a1"
+  },
+  "running_kaggle_image": null,
+  "reviewed_image_locks": {}
+}

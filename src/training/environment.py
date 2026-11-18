@@ -12,6 +12,16 @@ import tempfile
 PROFILES = {'grounding': 'kaggle-grounding.txt', 'sft_jepa_3b': 'kaggle-generation.txt',
             'grpo_3b': 'kaggle-generation.txt', 'system1': 'kaggle-core.txt',
             'evaluation': 'kaggle-evaluation.txt'}
+MODERN_PROFILES = {'grounding': 'kaggle-modern-grounding.txt', 'core': 'kaggle-modern-core.txt'}
+
+
+def selected_profile(profile=None):
+    value = os.environ.get('KAGGLE_PROFILE', 'LEGACY') if profile is None else profile
+    if value not in ('LEGACY', 'MODERN'):
+        raise ValueError('KAGGLE_PROFILE must be LEGACY or MODERN')
+    return value
+
+
 CORE = {'transformers': 'transformers', 'accelerate': 'accelerate',
         'huggingface-hub': 'huggingface_hub', 'tokenizers': 'tokenizers',
         'safetensors': 'safetensors', 'numpy': 'numpy', 'networkx': 'networkx',
@@ -33,10 +43,12 @@ def validate_python_runtime(stage):
     return '2.6' if version >= (3, 13) else '2.5'
 
 
-def profile_path(repo, stage):
-    if stage not in PROFILES:
-        raise ValueError('Unknown training environment profile')
-    return Path(repo) / 'requirements' / PROFILES[stage]
+def profile_path(repo, stage, *, profile=None):
+    profile = selected_profile(profile)
+    stages = MODERN_PROFILES if profile == 'MODERN' else PROFILES
+    if stage not in stages:
+        raise ValueError(f'Stage {stage} is unavailable under the {profile} profile')
+    return Path(repo) / 'requirements' / stages[stage]
 
 
 def requirements(path):
@@ -121,16 +133,25 @@ def check_transfer_disk(output, cache, payload):
         check_disk(cache, payload)
 
 
-def validate_environment(repo, stage, output_dir, device='cuda:0', *, smoke=False, quantization=False):
+def validate_environment(repo, stage, output_dir, device='cuda:0', *, smoke=False, quantization=False, profile=None):
+    profile = selected_profile(profile)
+    if profile == 'MODERN':
+        profile_path(repo, stage, profile=profile)
     if smoke:
         return {'smoke': True, 'environment_validation': 'offline wiring only'}
-    minimum_torch = validate_python_runtime(stage)
+    provenance = None
+    if profile == 'MODERN':
+        if not str(device).startswith('cuda'):
+            raise RuntimeError('Modern Kaggle preflight requires a CUDA device')
+        from src.training.modern_environment import modern_operation
+        provenance = modern_operation(repo, stage, output_dir)
+    minimum_torch = validate_python_runtime('grounding' if profile == 'MODERN' else stage)
     import torch
     from packaging.version import Version
     validate_torch_build(torch)
     if not Version(minimum_torch) <= Version(torch.__version__.split('+')[0]) < Version('3'):
         raise RuntimeError(f'Require preinstalled torch >={minimum_torch},<3 for this Python; select a compatible image before installing application packages')
-    for name, req in requirements(profile_path(repo, stage)).items():
+    for name, req in requirements(profile_path(repo, stage, profile=profile)).items():
         try:
             installed = metadata.version(name)
         except metadata.PackageNotFoundError:
@@ -172,6 +193,8 @@ def validate_environment(repo, stage, output_dir, device='cuda:0', *, smoke=Fals
         x = torch.ones(8, 8, device=device, requires_grad=True)
         (x @ x).sum().backward()
         torch.cuda.synchronize(device)
+        if provenance is not None and not torch.isfinite(x.grad).all():
+            raise RuntimeError('CUDA smoke kernel produced non-finite gradients')
         del x
         if stage in ('sft_jepa_3b', 'grpo_3b', 'evaluation') and quantization:
             import bitsandbytes as bnb
@@ -184,5 +207,7 @@ def validate_environment(repo, stage, output_dir, device='cuda:0', *, smoke=Fals
                 raise RuntimeError('NF4 kernel gradient verification failed')
             del layer, x
             report['nf4_kernel'] = 'passed'
+    if provenance is not None:
+        report.update(profile=profile, lock_sha256=provenance['lock_sha256'])
     print(json.dumps(report))
     return report

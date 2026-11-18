@@ -1,0 +1,2 @@
+-r kaggle-modern-core.txt
+sentence-transformers==5.3.0

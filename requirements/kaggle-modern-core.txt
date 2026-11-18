@@ -1,0 +1,11 @@
+# Candidate roots. Use the reviewed image-specific lock for installation.
+transformers==5.20.2
+accelerate==1.15.0
+huggingface-hub==1.33.0
+tokenizers==0.23.3
+safetensors==0.8.0
+numpy>=1.26,<3
+packaging>=20
+networkx==3.4.2
+sqlglot==26.16.4
+pydantic==2.11.3

@@ -39,13 +39,21 @@ class KagglePaths:
         return str(p)
 
 
-def install_dependencies(repo_dir, stage='evaluation'):
+def install_dependencies(repo_dir, stage='evaluation', *, profile=None):
     """Constrain the image CUDA stack; never reinstall it implicitly."""
+    from src.training.environment import profile_path, selected_profile
+    profile = selected_profile(profile)
+    if profile == 'MODERN':
+        profile_path(repo_dir, stage, profile=profile)
     if os.environ.get('PIPELINE_MODE', 'train').lower() == 'smoke':
         return
     if os.environ.get('INSTALL_DEPS', '0') != '1':
         return
-    from src.training.environment import profile_path, requirements, cuda_stack, validate_torch_build, validate_python_runtime
+    if profile == 'MODERN':
+        from src.training.modern_environment import modern_operation
+        output_root = Path(os.environ.get('KAGGLE_OUTPUT_DIR', '/kaggle/working/optimize-mars'))
+        return modern_operation(repo_dir, stage, output_root / 'modern-environment' / stage, install=True)
+    from src.training.environment import requirements, cuda_stack, validate_torch_build, validate_python_runtime
     import tempfile
     from packaging.version import Version
     minimum_torch = validate_python_runtime(stage)
@@ -60,7 +68,7 @@ def install_dependencies(repo_dir, stage='evaluation'):
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryFile(dir=snapshot_dir) as handle:
         handle.write(b'writable')
-    profile = profile_path(repo_dir, stage)
+    profile = profile_path(repo_dir, stage, profile=profile)
     # A warm notebook must not replace already imported packages underneath itself.
     for name, req in requirements(profile).items():
         module = name.replace('-', '_')
@@ -97,9 +105,9 @@ def install_dependencies(repo_dir, stage='evaluation'):
     (snapshot_dir / 'dependency_snapshot.json').write_text(json.dumps(snapshot, indent=2))
 
 
-def initialize_environment(repo_dir, stage, output_dir, *, smoke=False, device='cuda:0'):
+def initialize_environment(repo_dir, stage, output_dir, *, smoke=False, device='cuda:0', profile=None):
     from src.training.environment import validate_environment
-    return validate_environment(repo_dir, stage, output_dir, device, smoke=smoke, quantization=True)
+    return validate_environment(repo_dir, stage, output_dir, device, smoke=smoke, quantization=True, profile=profile)
 
 
 def environment_report(output_dir):
