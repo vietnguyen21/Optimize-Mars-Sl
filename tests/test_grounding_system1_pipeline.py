@@ -70,6 +70,23 @@ class PipelineContracts(unittest.TestCase):
         self.assertEqual(examples[0]['positive'],[0,1,2,3])
         self.assertEqual(examples[0]['negative'],[4])
 
+    def test_ungrounded_question_is_skipped_and_counted(self):
+        cards=[dict(db_id='a',table_name='t',column_name=c) for c in ['id','value']]
+        with self.assertLogs(embedding.logger,'WARNING') as logs:
+            examples=embedding.build_embedding_examples(cards,[dict(db_id='a',question='find id',positive_columns=['t.id']),
+                dict(db_id='a',question='noisy',positive_columns=['t.missing'])])
+        self.assertEqual(len(examples),1)
+        self.assertIn("Skipped 1 questions without grounded positive columns: {'a': 1}",logs.output[0])
+
+    @unittest.skipUnless(importlib.util.find_spec('sqlglot'), 'sqlglot unavailable')
+    def test_ungrounded_sql_is_skipped(self):
+        cards=[dict(db_id='db',table_name='t',column_name=c) for c in ['id','value']]
+        with self.assertLogs(embedding.logger,'WARNING'):
+            examples=embedding.build_embedding_examples(cards,[dict(db_id='db',question='ids',SQL='SELECT id FROM t'),
+                dict(db_id='db',question='literal',SQL="SELECT 'voice-actor' FROM t")])
+        self.assertEqual(len(examples),1)
+        self.assertEqual(examples[0]['positive'],[0])
+
     def test_embedding_requires_recoverable_database_membership(self):
         with self.assertRaises(ValueError):
             embedding.build_embedding_examples([dict(table_name='t',column_name='id')],

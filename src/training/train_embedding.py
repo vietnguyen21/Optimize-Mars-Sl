@@ -318,6 +318,7 @@ def build_embedding_examples(cards, records, db_dir=None):
     from pathlib import Path
     cache = {}
     examples = []
+    skipped = {}
     for row in records:
         db_id = row['db_id']
         if db_id not in cache:
@@ -370,11 +371,15 @@ def build_embedding_examples(cards, records, db_dir=None):
             positives = sorted(positive_names)
         pos = [names[n.lower()] for n in positives if n.lower() in names]
         if not pos:
-            raise ValueError(f'No grounded positive columns for question in {db_id}; provide positive_columns')
+            # Noisy gold SQL (e.g. string literals only) has no column to learn from; skip but count it.
+            skipped[db_id] = skipped.get(db_id, 0) + 1
+            continue
         neg = [i for i in indices if i not in pos]
         if not neg:
             continue
         examples.append({'query': f"Query: {row['question']} Evidence: {row.get('evidence','')}".strip(), 'positive':pos, 'negative':neg, 'db_id':db_id})
+    if skipped:
+        logger.warning(f'Skipped {sum(skipped.values())} questions without grounded positive columns: {skipped}')
     if not examples:
         raise ValueError('No usable embedding examples with both positive and negative columns')
     return examples
