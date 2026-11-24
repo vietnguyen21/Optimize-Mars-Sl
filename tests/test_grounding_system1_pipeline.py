@@ -57,6 +57,19 @@ class PipelineContracts(unittest.TestCase):
         self.assertEqual(examples[0]['positive'],[2])
         self.assertEqual(examples[0]['negative'],[0,1])
 
+    @unittest.skipUnless(importlib.util.find_spec('sqlglot'), 'sqlglot unavailable')
+    def test_shared_unqualified_column_labels_every_scope_table(self):
+        import sqlite3
+        cards=[dict(table_name=t,column_name=c) for t,cs in [('movies',['movie_id','title']),('ratings',['movie_id','score','user_id'])] for c in cs]
+        with tempfile.TemporaryDirectory() as tmp:
+            conn=sqlite3.connect(f'{tmp}/db.sqlite')
+            conn.executescript('CREATE TABLE movies(movie_id, title); CREATE TABLE ratings(movie_id, score, user_id);')
+            conn.close()
+            examples=embedding.build_embedding_examples(cards,[dict(db_id='db',question='Titles rated 5',
+                SQL='SELECT title FROM movies JOIN ratings USING (movie_id) WHERE score = 5 AND movie_id > 0')],db_dir=tmp)
+        self.assertEqual(examples[0]['positive'],[0,1,2,3])
+        self.assertEqual(examples[0]['negative'],[4])
+
     def test_embedding_requires_recoverable_database_membership(self):
         with self.assertRaises(ValueError):
             embedding.build_embedding_examples([dict(table_name='t',column_name='id')],

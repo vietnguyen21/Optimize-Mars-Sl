@@ -357,10 +357,8 @@ def build_embedding_examples(cards, records, db_dir=None):
                             positive_names.add(f'{table}.{column.name.lower()}')
                     else:
                         matches = [n for n in names if n.rsplit('.',1)[1] == column.name.lower() and n.split('.')[0] in aliases.values()]
-                        if len(matches) == 1:
-                            positive_names.add(matches[0])
-                        elif len(matches) > 1:
-                            raise ValueError(f'Ambiguous SQL column {column.name}; provide positive_columns for {db_id}')
+                        # A shared unqualified column (e.g. a join key) is used from every in-scope table.
+                        positive_names.update(matches)
                 # Projection wildcards reference the table columns. COUNT(*) does
                 # not reference every column and must not create false positives.
                 for projection in getattr(scope.expression,'selects',[]):
