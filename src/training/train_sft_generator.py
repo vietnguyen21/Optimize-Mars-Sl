@@ -224,7 +224,8 @@ class CompletionOnlyDataCollator:
     Overlength examples fail rather than silently training on a missing answer.
     """
     def __init__(self, tokenizer=None, think_tag="<think>", ignore_index=-100,
-                 max_length=1024):
+                 max_length=1024, prompt_format="v2"):
+        self.prompt_format = prompt_format
         self.tokenizer = tokenizer
         self.think_tag = think_tag
         self.ignore_index = ignore_index
@@ -238,11 +239,14 @@ class CompletionOnlyDataCollator:
                 raise ValueError("Encoded example exceeds max_length")
             return result
         if "question" in item:
-            prompt = build_prompt(item["question"], item.get("schema", item.get("ddl_statements", "")))
+            prompt = build_prompt(item["question"], item.get("schema", item.get("ddl_statements", "")),
+                                  item.get("evidence", ""), prompt_format=self.prompt_format)
             answer = item.get("answer", item.get("SQL", item.get("sql", "")))
             if not answer:
                 raise ValueError("SFT record requires answer/SQL/sql")
-            reasoning = item.get("think_steps", item.get("reasoning", item.get("evidence", "")))
+            # v2 reads evidence from the prompt; only v1 trained on it as a reasoning target.
+            fallback = item.get("evidence", "") if self.prompt_format == "v1" else ""
+            reasoning = item.get("think_steps", item.get("reasoning", fallback))
             completion = f"<think>\n{reasoning}\n</think>\n<answer>\n{answer}\n</answer>"
         elif "prompt" in item and "completion" in item:
             prompt, completion = item["prompt"], item["completion"]
@@ -475,7 +479,8 @@ def run_sft_training(
     if not TORCH_AVAILABLE:
         raise RuntimeError("Real SFT requires PyTorch, Transformers, PEFT and bitsandbytes; use dry_run=True only for smoke tests")
     from src.training.runtime import (load_records, seed_everything, load_causal_model,
-        ExperimentLogger, dataset_fingerprint, save_checkpoint, load_checkpoint)
+        ExperimentLogger, dataset_fingerprint, save_checkpoint, load_checkpoint,
+        selected_prompt_format)
     from src.training.jepa_module import LLM_JEPAPredictor
     max_steps = int(kwargs.get("max_steps", 100))
     save_steps = int(kwargs.get("save_steps", 50))
@@ -487,6 +492,7 @@ def run_sft_training(
     loss_dropout = float(kwargs.get("loss_dropout", 0.5))
     if min(max_steps, save_steps, accum, batch_size, epochs) <= 0 or lambda_jepa < 0 or not 0 <= loss_dropout <= 1:
         raise ValueError("Invalid SFT counts or JEPA configuration")
+    prompt_format = selected_prompt_format()
     seed_everything(seed)
     rows = load_records(data_path)
     resume = _resolve_resume(kwargs.get("resume_from_checkpoint", kwargs.get("resume")), output_dir)
@@ -495,7 +501,7 @@ def run_sft_training(
         source = kwargs.get("model_name_or_path", "meta-llama/Llama-3.2-3B-Instruct")
         model, tokenizer = load_causal_model(source, adapter_path=resume, training=True,
                                             device=device, rank=int(kwargs.get("lora_rank", 16)))
-    collator = CompletionOnlyDataCollator(tokenizer, max_length=max_length)
+    collator = CompletionOnlyDataCollator(tokenizer, max_length=max_length, prompt_format=prompt_format)
     encoded = []
     dropped = 0
     for row in rows:
@@ -518,7 +524,8 @@ def run_sft_training(
     fingerprint = dataset_fingerprint(data_path)
     contract = dict(batch_size=batch_size, accumulation=accum, max_length=max_length,
                     seed=seed, lambda_jepa=lambda_jepa, loss_dropout=loss_dropout,
-                    learning_rate=learning_rate, predictor_dim=int(kwargs.get("predictor_dim", 256)))
+                    learning_rate=learning_rate, predictor_dim=int(kwargs.get("predictor_dim", 256)),
+                    prompt_format=prompt_format)
     logger = ExperimentLogger(output_dir, dict(stage="sft", mode="train", **contract,
         model_source=kwargs.get("model_name_or_path", "meta-llama/Llama-3.2-3B-Instruct"),
         lora_rank=int(kwargs.get("lora_rank", 16)),

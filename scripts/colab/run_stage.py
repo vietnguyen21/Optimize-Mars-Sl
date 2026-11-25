@@ -59,7 +59,7 @@ def build_env(stage: str, drive_root: str, run_id: str, overrides: Dict[str, str
         "TRAIN_DEVICE": "cuda:0",
         "HF_HOME": "/content/hf-cache",
         "SEED": "42",
-        "MAX_LENGTH": "512",
+        "MAX_LENGTH": "2048" if stage in ("sft", "grpo") else "512",
         "MAX_STEPS": "100",
         "SAVE_STEPS": "25",
         "GRAD_ACCUM": "8",

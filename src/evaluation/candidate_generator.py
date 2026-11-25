@@ -7,6 +7,10 @@ from typing import List, Optional, Union, Dict, Any
 from src.common.schemas import SQLCandidate, GenerationInput, CompactSubSchema
 
 
+class PromptTooLongError(ValueError):
+    """The grounded prompt does not fit max_prompt_length."""
+
+
 class CandidateGenerator:
     """
     Candidate trajectory generator supporting 8 to 16 rollouts per prompt.
@@ -26,7 +30,9 @@ class CandidateGenerator:
         max_new_tokens: int = 256,
         max_prompt_length: int = 1024,
         constraint_mode: str = "posthoc",
+        prompt_format: str = "v2",
     ):
+        self.prompt_format = prompt_format
         self.dry_run = dry_run
         self.max_new_tokens = max_new_tokens
         self.max_prompt_length = max_prompt_length
@@ -56,7 +62,7 @@ class CandidateGenerator:
             prompt_or_input: GenerationInput instance or natural language question string.
             gold_sql: Legacy fixture reference, allowed only with explicit dry_run=True.
             num_candidates: Number of trajectories to sample (default 8, supports up to 16+).
-            temperature: Sampling temperature (default 0.7).
+            temperature: Sampling temperature (default 0.7); 0 means one greedy candidate.
             top_p: Nucleus sampling probability cutoff (default 0.9).
             top_k: Top-k vocabulary truncation cutoff (default 50).
             
@@ -68,24 +74,27 @@ class CandidateGenerator:
         if isinstance(prompt_or_input, GenerationInput):
             question = prompt_or_input.question
             k = num_candidates or prompt_or_input.num_trajectories
-            temp = temperature or prompt_or_input.temperature
+            temp = prompt_or_input.temperature if temperature is None else temperature
             p = top_p or prompt_or_input.top_p
             k_val = top_k or prompt_or_input.top_k
             sub_schema = prompt_or_input.sub_schema
+            evidence = prompt_or_input.evidence
         else:
             question = str(prompt_or_input)
             k = num_candidates or self.default_num_candidates
-            temp = temperature or self.default_temperature
+            temp = self.default_temperature if temperature is None else temperature
             p = top_p or self.default_top_p
             k_val = top_k or self.default_top_k
             sub_schema = None
+            evidence = ""
 
         # Clamp k to valid ablation range [1, 32], default expectation is [8, 16]
-        k = max(1, min(k, 32))
+        # Greedy rollouts are identical, so temperature=0 keeps one.
+        k = 1 if temp == 0 else max(1, min(k, 32))
 
         # If a live HuggingFace model and tokenizer are available, run model.generate
         if self.model is not None and self.tokenizer is not None:
-            return self._generate_with_model(question, k, temp, p, k_val, sub_schema)
+            return self._generate_with_model(question, k, temp, p, k_val, sub_schema, evidence)
 
         if not self.dry_run:
             raise RuntimeError("Real generation requires a loaded model and tokenizer; use dry_run=True only for fixtures")
@@ -98,19 +107,22 @@ class CandidateGenerator:
         temperature: float,
         top_p: float,
         top_k: int,
-        sub_schema: Optional[CompactSubSchema]
+        sub_schema: Optional[CompactSubSchema],
+        evidence: Optional[str] = ""
     ) -> List[SQLCandidate]:
         """Sample serially to keep K independent rollouts within one T4's memory."""
         import torch
         from src.training.runtime import build_prompt
         schema = sub_schema.ddl_statements if sub_schema else ""
-        prompt = build_prompt(question, schema)
+        prompt = build_prompt(question, schema, evidence, prompt_format=self.prompt_format)
         inputs = self.tokenizer(prompt, return_tensors="pt", add_special_tokens=True)
         if inputs["input_ids"].shape[1] > self.max_prompt_length:
-            raise ValueError("Grounded prompt exceeds max_prompt_length; reduce retrieval top_k or increase the explicit budget")
+            raise PromptTooLongError("Grounded prompt exceeds max_prompt_length; reduce retrieval top_k or increase the explicit budget")
         inputs = {key: value.to(self.model.device) for key, value in inputs.items()}
         prompt_length = inputs["input_ids"].shape[1]
         self.model.eval()
+        sampling = dict(do_sample=False) if temperature == 0 else dict(
+            do_sample=True, temperature=temperature, top_p=top_p, top_k=top_k)
         candidates = []
         for idx in range(num_candidates):
             generation_args = {}
@@ -122,8 +134,7 @@ class CandidateGenerator:
             with torch.inference_mode():
                 outputs = self.model.generate(
                     **inputs, max_new_tokens=self.max_new_tokens,
-                    num_return_sequences=1, do_sample=True,
-                    temperature=temperature, top_p=top_p, top_k=top_k,
+                    num_return_sequences=1, **sampling,
                     pad_token_id=self.tokenizer.pad_token_id,
                     eos_token_id=self.tokenizer.eos_token_id,
                     output_scores=True, return_dict_in_generate=True,

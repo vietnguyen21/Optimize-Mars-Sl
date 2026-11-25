@@ -285,12 +285,14 @@ class TestDenseGRPOTrainer(unittest.TestCase):
     def test_format_reward(self):
         valid = "<think>Step 1: Check table</think>\n<answer>SELECT * FROM t;</answer>"
         invalid_no_think = "SELECT * FROM t;"
-        invalid_empty = "<think></think><answer>SELECT 1;</answer>"
+        empty_think = "<think>\n\n</think>\n<answer>\nSELECT 1;\n</answer>"
+        invalid_empty = "<think></think><answer> </answer>"
         invalid_inverted = "<answer>SELECT 1;</answer><think>Reasoning</think>"
 
         self.assertEqual(compute_format_reward(valid), 1.0)
         self.assertEqual(compute_format_reward(invalid_no_think), 0.0)
         self.assertEqual(compute_format_reward(invalid_empty), 0.0)
+        self.assertEqual(compute_format_reward(empty_think), 1.0)
         self.assertEqual(compute_format_reward(invalid_inverted), 0.0)
 
     def test_exec_reward_on_real_sqlite(self):

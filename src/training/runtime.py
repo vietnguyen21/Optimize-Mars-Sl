@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import time
 import tempfile
 import warnings
@@ -49,7 +50,43 @@ def seed_everything(seed=42):
     torch.use_deterministic_algorithms(True, warn_only=True)
 
 
-def build_prompt(question, schema=''):
+PROMPT_FORMATS = ('v1', 'v2')
+PROMPT_FORMAT_FILE = 'prompt_format.txt'
+# Only our own delimiters are escaped, so SQL comparisons such as "age < 10" stay readable.
+_PROMPT_TAG = re.compile(r'<(?=\s*/?\s*(?:system|schema|evidence|question|think|answer)\s*/?\s*>)', re.I)
+
+
+def selected_prompt_format():
+    """PROMPT_FORMAT env key: kept out of the trainer kwargs, which would change the
+    sync fingerprint and make legacy v1 checkpoints impossible to resume."""
+    value = os.environ.get('PROMPT_FORMAT') or 'v2'
+    if value not in PROMPT_FORMATS:
+        raise ValueError(f'Unknown prompt_format {value!r}')
+    return value
+
+
+def check_prompt_format(checkpoint, prompt_format):
+    """Refuse an adapter trained on another prompt; adapters without the file predate v2."""
+    path = Path(checkpoint)
+    if not (path / 'adapter_config.json').is_file():
+        return  # A base model has no trained prompt format.
+    recorded = path / PROMPT_FORMAT_FILE
+    found = recorded.read_text().strip() if recorded.is_file() else 'v1'
+    if found != prompt_format:
+        raise ValueError(f'Checkpoint {path} uses prompt_format {found}, not {prompt_format}; '
+                         f'select {found} explicitly to use it')
+
+
+def build_prompt(question, schema='', evidence='', prompt_format='v2'):
+    if prompt_format not in PROMPT_FORMATS:
+        raise ValueError(f'Unknown prompt_format {prompt_format!r}')
+    if prompt_format == 'v2':
+        question, schema, evidence = (_PROMPT_TAG.sub('&lt;', str(text or ''))
+                                      for text in (question, schema, evidence))
+        return ('<system>You are an expert SQL analyst. Return reasoning in <think> and '
+                'SQLite SQL in <answer> tags.</system>\n'
+                f'<schema>{schema}</schema>\n<evidence>{evidence}</evidence>\n'
+                f'<question>{question}</question>\n[PRED]')
     return ('<system>You are an expert SQL analyst. Return reasoning in <think> and '
             'SQLite SQL in <answer> tags.</system>\n'
             f'<schema>{schema}</schema>\n<question>{question}</question>\n[PRED]')
@@ -179,6 +216,9 @@ def save_checkpoint(output_dir, model, optimizer, step, *, scaler=None, schedule
     base_identity = getattr(model, '_training_base_identity', None)
     if base_identity is not None:
         (path / IDENTITY_FILE).write_text(json.dumps(base_identity, sort_keys=True))
+    prompt_format = ((extra or {}).get('contract') or {}).get('prompt_format')
+    if prompt_format:
+        (path / PROMPT_FORMAT_FILE).write_text(prompt_format + '\n')
     training_device = next(model.parameters()).device
     cuda_device = (torch.cuda.current_device() if training_device.index is None else training_device.index) if training_device.type == 'cuda' else None
     state = dict(cuda_training_device=cuda_device, step=step, model=model_state, optimizer=optimizer.state_dict(),
@@ -215,6 +255,9 @@ def load_checkpoint(path, model, optimizer=None, *, scaler=None, scheduler=None,
     state = torch.load(p / 'training_state.pt', map_location='cpu', weights_only=False)
     if manifest and state.get('step') != manifest['step']:
         raise ValueError('Training state step differs from manifest')
+    saved_contract = state.get('extra', {}).get('contract')
+    if 'prompt_format' in ((expected_extra or {}).get('contract') or {}) and isinstance(saved_contract, dict):
+        saved_contract.setdefault('prompt_format', 'v1')  # Legacy checkpoints predate the field.
     if expected_extra and any(state.get('extra', {}).get(k) != v for k, v in expected_extra.items()):
         raise ValueError('Resume checkpoint dataset/configuration mismatch')
     from src.training.model_identity import read_identity, verify_identity

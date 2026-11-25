@@ -12,7 +12,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from src.common.schemas import GenerationInput
-from src.evaluation.candidate_generator import CandidateGenerator
+from src.evaluation.candidate_generator import CandidateGenerator, PromptTooLongError
 from src.evaluation.metrics import (compute_execution_accuracy, compute_vsr, compute_ece,
     compute_latency_stats, measure_memory_footprint, format_benchmark_summary)
 from src.grammar import get_grammar_engine
@@ -39,7 +39,8 @@ class EvaluationHarness:
                  dry_run=False, device='cuda:0', scorer_device='cpu',
                  grounding_device='cpu', retrieval_top_k=25,
                  max_new_tokens=256, max_prompt_length=2048,
-                 constraint_mode='posthoc', seed=42, training_data_paths=None):
+                 constraint_mode='posthoc', seed=42, training_data_paths=None,
+                 prompt_format='v2'):
         if not dry_run and (not model_path or not decision_model_path):
             raise ValueError('Real evaluation requires model_path and decision_model_path; smoke runs require dry_run=True')
         if num_candidates < 1:
@@ -50,6 +51,7 @@ class EvaluationHarness:
         self.grounding_model_path = grounding_model_path
         self.dry_run, self.seed, self.device = dry_run, seed, device
         self.constraint_mode, self.retrieval_top_k = constraint_mode, retrieval_top_k
+        self.prompt_format = prompt_format
         self.training_data_paths = training_data_paths or []
         self._schema_cache = {}
         self._dense_model = None
@@ -59,7 +61,8 @@ class EvaluationHarness:
         model, tokenizer = None, None
         if not dry_run:
             import sqlglot  # Real evaluation requires actual AST parsing, never regex-only verification.
-            from src.training.runtime import load_causal_model
+            from src.training.runtime import check_prompt_format, load_causal_model
+            check_prompt_format(model_path, prompt_format)
             model, tokenizer = load_causal_model(model_path, training=False, device=device)
         if constraint_mode == 'xgrammar' and not dry_run:
             # Missing optional dependency must fail before a long benchmark starts.
@@ -67,7 +70,8 @@ class EvaluationHarness:
         self.candidate_generator = CandidateGenerator(model=model, tokenizer=tokenizer,
             default_num_candidates=num_candidates, default_temperature=temperature,
             dry_run=dry_run, max_new_tokens=max_new_tokens,
-            max_prompt_length=max_prompt_length, constraint_mode=constraint_mode)
+            max_prompt_length=max_prompt_length, constraint_mode=constraint_mode,
+            prompt_format=prompt_format)
         self.grammar_engine = get_grammar_engine(grammar_engine_type)
         self.pv_validator = PVSQLValidator()
         self.db_probe = DBProbeEngine(max_session_queries=5, row_limit=5)
@@ -99,8 +103,13 @@ class EvaluationHarness:
         generation_input = GenerationInput(question=question, evidence=evidence,
             sub_schema=sub_schema, num_trajectories=self.num_candidates,
             temperature=self.temperature)
-        candidates = self.candidate_generator.generate(generation_input,
-            num_candidates=self.num_candidates, temperature=self.temperature)
+        overlength = False
+        try:
+            candidates = self.candidate_generator.generate(generation_input,
+                num_candidates=self.num_candidates, temperature=self.temperature)
+        except PromptTooLongError:
+            # Counted wrong and reported; one long schema must not abort the benchmark.
+            candidates, overlength = [], True
         self.db_probe.reset_counter()
         best, best_score, early_exited = None, 0.0, False
         validation_logs = []
@@ -123,7 +132,9 @@ class EvaluationHarness:
         # An abstention remains an abstention; never substitute a rejected query.
         return {'predicted_sql': best.sql if best is not None else '',
                 'confidence': best_score, 'abstained': best is None,
-                'abstention_reason': 'No candidate passed all gates' if best is None else None,
+                'abstention_reason': None if best is not None else (
+                    'Prompt exceeds max_prompt_length' if overlength else 'No candidate passed all gates'),
+                'overlength': overlength,
                 'early_exited': early_exited, 'candidates': validation_logs,
                 'grounded_tables': sub_schema.selected_tables,
                 'bridge_tables': sub_schema.bridge_tables_added}
@@ -188,6 +199,9 @@ class EvaluationHarness:
             'constraint_mode': self.constraint_mode,
             'grammar_enforced_during_generation': not self.dry_run and self.constraint_mode == 'xgrammar',
             'grammar_scope': 'SQLite SELECT subset; AST and execution checks still required',
+            'prompt_format': self.prompt_format, 'temperature': self.temperature,
+            'num_candidates': 1 if self.temperature == 0 else self.num_candidates,
+            'overlength_prompts': sum(log['overlength'] for log in logs),
             'seed': self.seed, 'training_overlap_checked': bool(self.training_data_paths),
             'total_queries': len(records), 'execution_accuracy': ex, 'valid_sql_rate': vsr,
             'ece': compute_ece(confidences, matches),
@@ -224,6 +238,8 @@ def main():
     parser.add_argument('--decision_model_path')
     parser.add_argument('--grounding_model_path')
     parser.add_argument('--num_candidates', type=int, default=8)
+    parser.add_argument('--temperature', type=float, default=0.7)
+    parser.add_argument('--prompt_format', choices=['v1', 'v2'], default='v2')
     parser.add_argument('--limit', type=int)
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--training_data_paths', nargs='*', default=[])

@@ -402,7 +402,7 @@ def build_candidate_dataset(records, db_dir, output_path=None, generator=None, n
             if generator is None or getattr(generator,'dry_run',False):
                 raise ValueError('Supply sampled candidates or a checkpoint-backed generator; no synthetic fallback')
             from src.common.schemas import GenerationInput, CompactSubSchema
-            inp = GenerationInput(question=row['question'], sub_schema=CompactSubSchema(
+            inp = GenerationInput(question=row['question'], evidence=row.get('evidence', ''), sub_schema=CompactSubSchema(
                 db_id=row['db_id'], selected_tables=[], selected_columns={}, foreign_keys=[], ddl_statements=schema),
                 num_trajectories=num_candidates)
             candidates = generator.generate(inp, num_candidates=num_candidates)

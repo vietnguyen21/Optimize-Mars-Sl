@@ -192,6 +192,7 @@ class TestTinyGenerationTraining(unittest.TestCase):
             sft = root / "sft"
             sft.mkdir()
             (sft / "adapter_config.json").write_text("{}")
+            (sft / "prompt_format.txt").write_text("v2\n")
             (sft / "adapter_model.bin").write_bytes(b"tiny-reference-identity")
             data = root / "grpo.json"
             data.write_text(json.dumps([dict(db_id="tiny", question=f"Q{i}",

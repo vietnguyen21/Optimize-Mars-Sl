@@ -54,7 +54,7 @@ def compute_format_reward(generation_text: str) -> float:
     """
     Evaluates formatting adherence.
     Requires:
-      - Valid <think>...</think> pair with non-whitespace content.
+      - Valid <think>...</think> pair; it may be empty (the v2 SFT target).
       - Valid <answer>...</answer> pair with non-whitespace content.
       - <think> appears before <answer>.
     
@@ -70,10 +70,9 @@ def compute_format_reward(generation_text: str) -> float:
     if not think_match or not answer_match:
         return 0.0
 
-    think_content = think_match.group(1).strip()
     answer_content = answer_match.group(1).strip()
 
-    if not think_content or not answer_content:
+    if not answer_content:
         return 0.0
 
     # Ensure <think> precedes <answer>
@@ -495,7 +494,7 @@ def run_dry_run(
         db_id = item["db_id"]
         db_path = os.path.join(db_dir, f"{db_id}.sqlite")
         gold_sql = item["SQL"]
-        gold_think = item.get("evidence", "Analyze schema and join matching foreign keys.")
+        gold_think = "Analyze schema and join matching foreign keys."
 
         # Construct group of 4 candidate rollouts with diverse qualities
         cands = [
@@ -604,7 +603,7 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
         raise RuntimeError("Real GRPO requires PyTorch/Transformers/PEFT/bitsandbytes; dry_run=True is smoke only")
     from src.training.runtime import (load_records, build_prompt, load_causal_model,
         seed_everything, resolve_db, ExperimentLogger, dataset_fingerprint,
-        save_checkpoint, load_checkpoint)
+        save_checkpoint, load_checkpoint, selected_prompt_format, check_prompt_format)
     from src.training.train_sft_generator import _optimizer_update, _resolve_resume, _generation_extra
     import sqlglot  # Required for genuine atomic AST rewards, optional only in smoke mode.
     sft_checkpoint = kwargs.get("sft_checkpoint", kwargs.get("adapter_path"))
@@ -613,6 +612,9 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
         sft_checkpoint = str(Path(initial_resume) / "reference")
     if not sft_checkpoint or not (Path(sft_checkpoint) / "adapter_config.json").is_file():
         raise ValueError("GRPO requires sft_checkpoint pointing to an exported SFT PEFT adapter")
+    prompt_format = selected_prompt_format()
+    if not initial_resume:  # A resumed run is checked through its contract instead.
+        check_prompt_format(sft_checkpoint, prompt_format)
     output_dir = output_dir or "/kaggle/working/grpo_3b"
     device = kwargs.get("device", "cuda:0")
     max_steps = int(kwargs.get("max_steps", 100))
@@ -653,7 +655,7 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
         raise FileNotFoundError("Missing reference SFT adapter weights")
     contract = dict(group_size=group_size, accumulation=accum, max_length=max_length,
         max_new_tokens=max_new_tokens, seed=seed, beta_kl=beta_kl, clip_eps=clip_eps,
-        temperature=temperature, learning_rate=learning_rate,
+        temperature=temperature, learning_rate=learning_rate, prompt_format=prompt_format,
         reference_sha256=dataset_fingerprint(reference_weights))
     logger = ExperimentLogger(output_dir, dict(stage="grpo", mode="train", **contract))
     step, first_epoch, first_index = 0, 0, 0
@@ -678,7 +680,8 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
             item = rows[order[record_index]]
             db_path = resolve_db(db_dir, item["db_id"])
             schema = _schema_for_record(item, db_path)
-            prompt = build_prompt(item["question"], schema)
+            prompt = build_prompt(item["question"], schema, item.get("evidence", ""),
+                                  prompt_format=prompt_format)
             prompt_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=True)["input_ids"].to(device)
             next_index = record_index + 1
             if prompt_ids.shape[1] > max_length - max_new_tokens:
@@ -702,7 +705,7 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
                     ref = completion_token_logprobs(model, generated, prompt_ids.shape[1], temperature)
                     _activate_adapter(model, "default")
                 reward = compute_dense_rewards(response, item.get("SQL", item.get("answer", item.get("sql", ""))),
-                    item.get("think_steps", item.get("reasoning", item.get("evidence", ""))), db_path)
+                    item.get("think_steps", item.get("reasoning", "")), db_path)
                 rewards.append(reward)
                 samples.append((generated.detach().cpu(), old.cpu(), ref.cpu()))
                 del generated, old, ref
