@@ -277,7 +277,7 @@ class TestM3StressSuite(unittest.TestCase):
         self.assertIn("SFT_CHECKPOINT", source)
         self.assertIn("sft_checkpoint=SFT_CHECKPOINT", source)
         self.assertIn('os.environ.get("GROUP_SIZE", "2")', source)
-        self.assertIn('os.environ.get("MAX_NEW_TOKENS", "128")', source)
+        self.assertIn('os.environ.get("MAX_NEW_TOKENS", "256")', source)
         self.assertIn("dry_run=SMOKE", source)
 
 

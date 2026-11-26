@@ -696,6 +696,9 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
                     generated = model.generate(input_ids=prompt_ids,
                         attention_mask=torch.ones_like(prompt_ids), do_sample=True,
                         temperature=temperature, top_p=1.0, top_k=0,
+                        # Without this the checkpoint's generation_config penalty would make
+                        # sampling differ from the old/reference logprobs computed below.
+                        repetition_penalty=1.0,
                         max_new_tokens=max_new_tokens, use_cache=True,
                         pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
                     # Slice prompt away before decoding; no question/schema in reward text.

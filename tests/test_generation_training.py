@@ -294,6 +294,7 @@ class TestNativeLlamaPeftTraining(unittest.TestCase):
             model, tokenizer = load_causal_model(str(base), adapter_path=resumed["checkpoint_path"],
                                                 training=False, device="cpu")
             self.assertTrue(hasattr(model, "peft_config"))
+            self.assertEqual(model._prompt_format, "v2")  # Read by CandidateGenerator's format check.
             with torch.no_grad():
                 generated = model.generate(**tokenizer("Q", return_tensors="pt"), max_new_tokens=2)
             self.assertGreater(generated.shape[1], 1)
@@ -333,6 +334,7 @@ class TestNativeLlamaPeftTraining(unittest.TestCase):
             self.assertEqual(resumed["optimizer_steps"], 2)
             original = load_file(str(Path(sft["checkpoint_path"], "adapter_model.safetensors")))
             reference = load_file(str(Path(resumed["checkpoint_path"], "reference", "adapter_model.safetensors")))
+            self.assertEqual(Path(resumed["checkpoint_path"], "reference", "prompt_format.txt").read_text(), "v2\n")
             final = load_file(str(Path(full["checkpoint_path"], "adapter_model.safetensors")))
             restored = load_file(str(Path(resumed["checkpoint_path"], "adapter_model.safetensors")))
             for key, value in original.items():

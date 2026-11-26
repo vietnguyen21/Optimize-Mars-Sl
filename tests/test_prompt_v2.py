@@ -42,11 +42,28 @@ class RecordingTokenizer(ByteTokenizer):
         return "<think>\n\n</think>\n<answer>\nSELECT 1\n</answer>"
 
 
+# A checkpoint generation_config that would reweight or truncate tokens if inherited.
+INHERITED = dict(repetition_penalty=1.3, temperature=0.2, top_p=0.5, top_k=5)
+
+
+def resolved(call):
+    """Settings generate() really uses: the model's generation_config updated by the call kwargs."""
+    try:
+        from transformers import GenerationConfig
+    except ImportError:
+        return dict(INHERITED, **call)  # Same override rule as GenerationConfig.update.
+    config = GenerationConfig(**INHERITED)
+    config.update(**call)
+    return dict(vars(config))
+
+
 class RecordingModel:
     device = "cpu"
 
-    def __init__(self):
+    def __init__(self, prompt_format=None):
         self.calls = []
+        if prompt_format:
+            self._prompt_format = prompt_format
 
     def eval(self):
         return self
@@ -117,6 +134,10 @@ class TestPromptBytes(unittest.TestCase):
                    for stage in ("grounding", "sft", "grpo", "system1", "evaluation")}
         self.assertEqual(lengths, dict(grounding="512", sft="2048", grpo="2048",
                                        system1="512", evaluation="512"))
+        # GRPO samples the same 256-token completion budget evaluation uses; --set still wins.
+        self.assertEqual(build_env("grpo", "/d", "r", {}, False, base={})["MAX_NEW_TOKENS"], "256")
+        self.assertEqual(build_env("grpo", "/d", "r", {"MAX_NEW_TOKENS": "64"}, False, base={})["MAX_NEW_TOKENS"], "64")
+        self.assertNotIn("MAX_NEW_TOKENS", build_env("evaluation", "/d", "r", {}, False, base={}))
 
     def test_notebook05_reads_env_keys(self):
         path = Path(__file__).resolve().parents[1] / "notebooks/05_end_to_end_evaluation.ipynb"
@@ -179,8 +200,9 @@ class TestTrainingContract(unittest.TestCase):
             tokenizer=ByteTokenizer(), device="cpu", epochs=9, batch_size=1, max_length=2048,
             gradient_accumulation_steps=2, lambda_jepa=0.5, loss_dropout=0.0, predictor_dim=4, **kwargs)
 
-    def grpo(self, reward, **kwargs):
+    def grpo(self, reward, policy=None, **kwargs):
         from tests.test_generation_training import TinyPolicy
+        policy = policy or TinyPolicy()
         sft = self.root / "adapter"
         sft.mkdir(exist_ok=True)
         (sft / "adapter_config.json").write_text("{}")
@@ -191,7 +213,7 @@ class TestTrainingContract(unittest.TestCase):
         sqlite3.connect(self.root / "tiny.sqlite").close()
         tokenizer = RecordingTokenizer()
         torch.manual_seed(9)
-        with patch("src.training.runtime.load_causal_model", side_effect=lambda *a, **k: (TinyPolicy(), tokenizer)), \
+        with patch("src.training.runtime.load_causal_model", side_effect=lambda *a, **k: (policy, tokenizer)), \
              patch("src.training.train_grpo_generator.compute_dense_rewards", side_effect=reward):
             try:
                 return tokenizer.prompts, run_grpo_training(data_path=str(data), db_dir=str(self.root),
@@ -257,6 +279,48 @@ class TestTrainingContract(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "uses prompt_format v2"):
             self.grpo(reward, epochs=9, max_steps=2)
 
+    def test_grpo_sampling_ignores_inherited_generation_config(self):
+        from tests.test_generation_training import TinyPolicy
+
+        class RecordingPolicy(TinyPolicy):
+            def generate(self, **kwargs):
+                self.calls.append(kwargs)
+                return super().generate(**kwargs)
+
+        policy = RecordingPolicy()
+        policy.calls = []
+
+        def reward(*args):
+            raise Captured
+
+        self.grpo(reward, policy=policy, epochs=1, max_steps=1, temperature=0.8)
+        settings = resolved(policy.calls[0])
+        # Old/reference logprobs are softmax(logits / temperature); sampling must use that same distribution.
+        self.assertEqual({key: settings[key] for key in INHERITED},
+                         dict(repetition_penalty=1.0, temperature=0.8, top_p=1.0, top_k=0))
+        self.assertIs(settings["do_sample"], True)
+
+    def test_grpo_reference_adapter_records_prompt_format(self):
+        from src.training.runtime import save_checkpoint
+        from tests.test_generation_training import TinyPolicy
+
+        class PeftLikePolicy(TinyPolicy):
+            def save_pretrained(self, path):
+                # PEFT writes every extra adapter to a subdirectory named after it.
+                for name in ("", "reference"):
+                    Path(path, name).mkdir(exist_ok=True)
+                    Path(path, name, "adapter_config.json").write_text("{}")
+
+        model = PeftLikePolicy()
+        optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad])
+        checkpoint = save_checkpoint(self.root / "grpo", model, optimizer, 1,
+                                     extra=dict(contract=dict(prompt_format="v2")))
+        for directory in (Path(checkpoint), Path(checkpoint, "reference")):
+            self.assertEqual(directory.joinpath("prompt_format.txt").read_text(), "v2\n")
+            check_prompt_format(directory, "v2")
+            with self.assertRaisesRegex(ValueError, "uses prompt_format v2"):
+                check_prompt_format(directory, "v1")
+
     def test_jepa_loss_is_finite_with_empty_think(self):
         from src.training.jepa_module import LLM_JEPAPredictor
         from src.training.train_sft_generator import joint_sft_jepa_loss
@@ -318,6 +382,89 @@ class TestEvaluationPrompt(unittest.TestCase):
         sampled = self.generator()
         self.assertEqual(len(sampled.generate(eval_input(), num_candidates=4, temperature=0.7)), 4)
         self.assertEqual((sampled.model.calls[0]["do_sample"], sampled.model.calls[0]["temperature"]), (True, 0.7))
+
+    def test_candidate_generation_ignores_inherited_generation_config(self):
+        generator = self.generator()
+        generator.generate(eval_input(), num_candidates=1, temperature=0)
+        generator.generate(eval_input(), num_candidates=1, temperature=0.7)
+        greedy, sampled = (resolved(call) for call in generator.model.calls)
+        # A penalty would make greedy differ from argmax and logprobs differ from the sampled policy.
+        self.assertEqual((greedy["repetition_penalty"], greedy["do_sample"]), (1.0, False))
+        self.assertEqual({key: sampled[key] for key in INHERITED},
+                         dict(repetition_penalty=1.0, temperature=0.7, top_p=0.9, top_k=50))
+
+    def test_model_object_trained_on_another_format_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "uses prompt_format v1, not v2"):
+            self.generator_module.CandidateGenerator(model=RecordingModel("v1"), tokenizer=RecordingTokenizer())
+        untagged_adapter = RecordingModel()
+        untagged_adapter.peft_config = {"default": object()}  # Predates v2, like a file-less adapter dir.
+        with self.assertRaisesRegex(ValueError, "uses prompt_format v1"):
+            self.generator_module.CandidateGenerator(model=untagged_adapter, tokenizer=RecordingTokenizer())
+        self.generator_module.CandidateGenerator(model=untagged_adapter, prompt_format="v1")
+        with self.assertRaisesRegex(ValueError, "uses prompt_format v2, not v1"):
+            self.generator_module.CandidateGenerator(model=RecordingModel("v2"), prompt_format="v1")
+        self.generator_module.CandidateGenerator(model=RecordingModel("v2"))
+        self.generator_module.CandidateGenerator(model=RecordingModel())  # Base model: any format.
+
+    def real_harness(self, tmp, adapter_format, prompt_format):
+        adapter = Path(tmp, "adapter")
+        adapter.mkdir(exist_ok=True)
+        (adapter / "adapter_config.json").write_text("{}")
+        (adapter / "prompt_format.txt").write_text(adapter_format + "\n")
+        self.loads = loads = []
+
+        def load(path, **kwargs):
+            loads.append(path)
+            return RecordingModel(adapter_format), RecordingTokenizer()
+
+        real_scorer = self.harness_module.LayaScorer
+        with patch.dict(sys.modules, {"sqlglot": sys.modules.get("sqlglot") or types.ModuleType("sqlglot")}), \
+             patch("src.training.runtime.load_causal_model", side_effect=load), \
+             patch.object(self.harness_module, "LayaScorer", side_effect=lambda **k: real_scorer(**dict(k, model_path=None, dry_run=True))):
+            harness = self.harness_module.EvaluationHarness(db_dir="data/mini", num_candidates=4, temperature=0,
+                model_path=str(adapter), decision_model_path=str(adapter), device="cpu", max_prompt_length=10000,
+                output_log_dir=tmp + "/logs", output_report_dir=tmp + "/reports", prompt_format=prompt_format)
+        return harness, loads
+
+    def test_harness_builds_prompts_with_the_selected_format_and_refuses_a_mismatch(self):
+        rows = [json.loads(line) for line in
+                Path("data/mini/mini_bird.jsonl").read_text(encoding="utf-8").splitlines()[:2]]
+        for prompt_format in ("v1", "v2"):
+            with tempfile.TemporaryDirectory() as tmp, \
+                 patch.object(self.harness_module, "measure_memory_footprint", return_value={}):
+                harness, loads = self.real_harness(tmp, prompt_format, prompt_format)
+                metrics = harness.evaluate_dataset("data/mini/mini_bird.jsonl", limit_samples=2)
+            self.assertEqual((len(loads), metrics["prompt_format"]), (1, prompt_format))
+            calls = harness.candidate_generator.model.calls
+            self.assertEqual(len(calls), 2)
+            for call in calls:  # Evaluation path, resolved like the generator path above.
+                self.assertEqual((resolved(call)["repetition_penalty"], resolved(call)["do_sample"]), (1.0, False))
+            for row, prompt in zip(rows, harness.candidate_generator.tokenizer.prompts):
+                self.assertTrue(prompt.startswith(SYSTEM + "<schema>"))
+                self.assertEqual(f"<evidence>{row['evidence']}</evidence>" in prompt, prompt_format == "v2")
+                self.assertEqual("<evidence>" in prompt, prompt_format == "v2")
+                self.assertNotIn(row["SQL"].rstrip(";"), prompt)
+        with tempfile.TemporaryDirectory() as tmp:
+            for adapter_format, selected in (("v1", "v2"), ("v2", "v1")):
+                with self.assertRaisesRegex(ValueError, f"uses prompt_format {adapter_format}, not {selected}"):
+                    self.real_harness(tmp, adapter_format, selected)
+                self.assertEqual(self.loads, [])  # Refused before the checkpoint is loaded.
+
+    def test_decision_candidates_prompt_has_evidence_and_no_gold(self):
+        from src.training.train_decision_model import build_candidate_dataset
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(Path(tmp, "tiny.sqlite"))
+            conn.execute("CREATE TABLE t(x)")
+            conn.commit()
+            conn.close()
+            generator = self.generator()
+            rows = build_candidate_dataset([RECORD], tmp, generator=generator, num_candidates=2)
+        # Same v2 prompt as SFT/GRPO/eval: evidence in, gold SQL out.
+        self.assertEqual(generator.tokenizer.prompts, [V2])  # Tokenized once for both rollouts.
+        self.assertEqual(len(generator.model.calls), 2)
+        self.assertNotIn(RECORD["SQL"], V2)
+        self.assertEqual([row["sql"] for row in rows], ["SELECT 1"])
+        self.assertTrue(all(resolved(call)["repetition_penalty"] == 1.0 for call in generator.model.calls))
 
     def harness(self, tmp, **kwargs):
         harness = self.harness_module.EvaluationHarness(db_dir="data/mini", dry_run=True, num_candidates=4,

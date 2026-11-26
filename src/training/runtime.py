@@ -65,13 +65,21 @@ def selected_prompt_format():
     return value
 
 
+def adapter_prompt_format(checkpoint):
+    """Format an adapter was trained on; None for a base model, v1 for adapters predating the file."""
+    path = Path(checkpoint)
+    if not (path / 'adapter_config.json').is_file():
+        return None
+    recorded = path / PROMPT_FORMAT_FILE
+    return recorded.read_text().strip() if recorded.is_file() else 'v1'
+
+
 def check_prompt_format(checkpoint, prompt_format):
     """Refuse an adapter trained on another prompt; adapters without the file predate v2."""
     path = Path(checkpoint)
-    if not (path / 'adapter_config.json').is_file():
+    found = adapter_prompt_format(path)
+    if found is None:
         return  # A base model has no trained prompt format.
-    recorded = path / PROMPT_FORMAT_FILE
-    found = recorded.read_text().strip() if recorded.is_file() else 'v1'
     if found != prompt_format:
         raise ValueError(f'Checkpoint {path} uses prompt_format {found}, not {prompt_format}; '
                          f'select {found} explicitly to use it')
@@ -219,6 +227,9 @@ def save_checkpoint(output_dir, model, optimizer, step, *, scaler=None, schedule
     prompt_format = ((extra or {}).get('contract') or {}).get('prompt_format')
     if prompt_format:
         (path / PROMPT_FORMAT_FILE).write_text(prompt_format + '\n')
+        # GRPO also saves its frozen SFT reference adapter; it shares the policy's prompt.
+        if (path / 'reference' / 'adapter_config.json').is_file():
+            (path / 'reference' / PROMPT_FORMAT_FILE).write_text(prompt_format + '\n')
     training_device = next(model.parameters()).device
     cuda_device = (torch.cuda.current_device() if training_device.index is None else training_device.index) if training_device.type == 'cuda' else None
     state = dict(cuda_training_device=cuda_device, step=step, model=model_state, optimizer=optimizer.state_dict(),
@@ -339,4 +350,6 @@ def load_causal_model(model_name_or_path, adapter_path=None, training=False, dev
     else:
         model.eval()
     model._training_base_identity = expected or identity
+    # Carried on the object so CandidateGenerator can refuse a model trained on another prompt.
+    model._prompt_format = adapter_prompt_format(adapter_path) if adapter_path else None
     return model, tokenizer

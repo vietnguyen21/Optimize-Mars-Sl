@@ -39,6 +39,14 @@ class CandidateGenerator:
         self.constraint_mode = constraint_mode
         if constraint_mode not in {"posthoc", "xgrammar"}:
             raise ValueError("constraint_mode must be posthoc or xgrammar")
+        if model is not None:
+            # load_causal_model tags the adapter's format; an untagged PEFT model predates v2.
+            found = getattr(model, "_prompt_format", None)
+            if found is None and hasattr(model, "peft_config"):
+                found = "v1"
+            if found is not None and found != prompt_format:
+                raise ValueError(f"Model adapter uses prompt_format {found}, not {prompt_format}; "
+                                 f"select {found} explicitly to use it")
         self.model = model
         self.tokenizer = tokenizer
         self.default_num_candidates = default_num_candidates
@@ -121,8 +129,10 @@ class CandidateGenerator:
         inputs = {key: value.to(self.model.device) for key, value in inputs.items()}
         prompt_length = inputs["input_ids"].shape[1]
         self.model.eval()
-        sampling = dict(do_sample=False) if temperature == 0 else dict(
-            do_sample=True, temperature=temperature, top_p=top_p, top_k=top_k)
+        # Explicit, so a penalty in the checkpoint's generation_config cannot
+        # reweight tokens: greedy stays the argmax and logprobs stay honest.
+        sampling = dict(do_sample=False, repetition_penalty=1.0) if temperature == 0 else dict(
+            do_sample=True, temperature=temperature, top_p=top_p, top_k=top_k, repetition_penalty=1.0)
         candidates = []
         for idx in range(num_candidates):
             generation_args = {}

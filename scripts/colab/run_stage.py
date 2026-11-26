@@ -69,6 +69,8 @@ def build_env(stage: str, drive_root: str, run_id: str, overrides: Dict[str, str
     })
     if stage in ("sft", "grpo", "evaluation"):
         env.setdefault("GENERATOR_MODEL", DEFAULT_GENERATOR)
+    if stage == "grpo":
+        env["MAX_NEW_TOKENS"] = "256"  # Same completion budget as evaluation.
     env.update(overrides)
     return env
 
