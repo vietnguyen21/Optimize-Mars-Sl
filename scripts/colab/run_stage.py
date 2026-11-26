@@ -10,7 +10,11 @@ committed notebook in a fresh kernel with nbconvert. The executed notebook, a lo
   grounding  notebooks/01   sft  notebooks/02   grpo  notebooks/03
   system1    notebooks/04   evaluation  notebooks/05
 
-Rerunning the same --run-id resumes from the newest checkpoint in that run folder.
+Rerunning the same --run-id resumes from the newest checkpoint in that run folder, but only with the
+same code: the runner refuses to resume when the code hash differs from the newest launch json.
+--overlay <dir> copies the files of <dir> over the repo before anything runs (members without git).
+Each launch json records commit, dirty, code_hash and a patch (code-<stamp>.patch) that rebuilds the
+working tree from that commit with `git apply`.
 
 Example:
   python scripts/colab/run_stage.py --stage grounding --run-id m1-grounding-seed42
@@ -18,10 +22,13 @@ Example:
 """
 
 import argparse
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -112,12 +119,74 @@ def ensure_databases(drive_root: str) -> None:
                     "--data_dir", f"{drive_root}/data", "--db_dir", LOCAL_DB_DIR, "--databases_only"], check=True)
 
 
-def git_commit() -> str:
+def apply_overlay(overlay: Path, repo: Path = REPO) -> List[str]:
+    """Copies every file of `overlay` over the repo; refuses .git, symlinks and paths leaving the repo."""
+    overlay, root = Path(overlay).resolve(), Path(repo).resolve()
+    if not overlay.is_dir():
+        raise SystemExit(f"Overlay folder not found: {overlay}")
+    plan = []
+    for dirpath, dirnames, filenames in os.walk(overlay):
+        for name in dirnames + filenames:
+            src = Path(dirpath) / name
+            rel = src.relative_to(overlay)
+            if src.is_symlink():
+                raise SystemExit(f"Overlay refused: symlink {rel} (copy the real file instead)")
+            if name in filenames:
+                plan.append((src, overlay_target(root, rel.as_posix())))
+    for src, dest in plan:  # Copy only after every path passed the checks.
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dest)
+    return [str(dest.relative_to(root)) for _, dest in plan]
+
+
+def overlay_target(root: Path, rel: str) -> Path:
+    dest = (root / rel).resolve()
+    if Path(rel).is_absolute() or ".." in Path(rel).parts or dest == root or root not in dest.parents:
+        raise SystemExit(f"Overlay refused: {rel} escapes the repo")
+    if dest.relative_to(root).parts[0].lower() == ".git":
+        raise SystemExit(f"Overlay refused: {rel} writes into .git")
+    return dest
+
+
+def git(repo: Path, *args: str, env: Optional[Dict[str, str]] = None) -> bytes:
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True, env=env).stdout
+
+
+def code_provenance(repo: Path = REPO) -> Dict[str, object]:
+    """Exact commit, dirty flag and a hash over every tracked and untracked non-ignored file."""
     try:
-        return subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True,
-                              text=True, check=True).stdout.strip()
-    except Exception:
-        return "unknown"
+        commit = git(repo, "rev-parse", "--verify", "HEAD").decode().strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise SystemExit(f"Cannot resolve the code commit of {repo} ({exc}). Run from a git clone with a "
+                         "checked-out commit; results without a commit are not traceable.")
+    files = sorted({os.fsdecode(p) for p in git(repo, "ls-files", "-z", "-co", "--exclude-standard").split(b"\0") if p})
+    digest = hashlib.sha256()
+    for rel in files:
+        path = Path(repo) / rel
+        if path.is_file():  # Deleted tracked files drop out of the hash.
+            data = path.read_bytes()
+            digest.update(rel.encode("utf-8", "surrogateescape") + b"\0" + str(len(data)).encode() + b"\0" + data)
+    dirty = bool(git(repo, "status", "--porcelain", "--untracked-files=all").strip())
+    return {"commit": commit, "dirty": dirty, "code_hash": digest.hexdigest()}
+
+
+def code_patch(repo: Path, commit: str) -> bytes:
+    """Binary diff from `commit` to the working tree, untracked files included, without touching the real index."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, GIT_INDEX_FILE=os.path.join(tmp, "index"))
+        git(repo, "add", "-A", env=env)
+        return git(repo, "diff", "--cached", "--binary", commit, env=env)
+
+
+def check_resume(run_dir: Path, code_hash: str) -> None:
+    """A checkpoint may only be resumed by the code that wrote it; otherwise use a new --run-id."""
+    if not has_checkpoint(run_dir):
+        return
+    launches = sorted(run_dir.glob("launch-*.json"))
+    previous = json.loads(launches[-1].read_text()).get("code_hash") if launches else None
+    if previous != code_hash:
+        raise SystemExit(f"Refusing to resume {run_dir}: its checkpoint was written by code_hash {previous or 'none'}, "
+                         f"current code_hash is {code_hash}. Start a new --run-id or restore that code.")
 
 
 def main():
@@ -127,7 +196,11 @@ def main():
     parser.add_argument("--drive-root", default=DEFAULT_DRIVE_ROOT)
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                         help="Override a notebook environment variable, e.g. MAX_STEPS=50")
+    parser.add_argument("--overlay", help="Folder whose files are copied over the repo before the run")
     args = parser.parse_args()
+
+    if args.overlay:
+        print("overlay:", ", ".join(apply_overlay(Path(args.overlay))), flush=True)
 
     ensure_drive(args.drive_root)
     ensure_databases(args.drive_root)
@@ -145,9 +218,13 @@ def main():
     if token and "HF_TOKEN" not in env:
         env["HF_TOKEN"] = token
 
+    provenance = code_provenance()
+    check_resume(run_dir, provenance["code_hash"])
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    launch = {"stage": args.stage, "run_id": args.run_id, "commit": git_commit(), "started": stamp,
-              "python": sys.version.split()[0], "overrides": parse_overrides(args.set),
+    patch = f"code-{stamp}.patch"
+    (run_dir / patch).write_bytes(code_patch(REPO, provenance["commit"]))
+    launch = {"stage": args.stage, "run_id": args.run_id, **provenance, "overlay": args.overlay, "patch": patch,
+              "started": stamp, "python": sys.version.split()[0], "overrides": parse_overrides(args.set),
               "env": {k: env[k] for k in sorted(env) if k.startswith(("KAGGLE_", "PIPELINE", "MAX_", "SAVE_",
                       "GRAD_", "SEED", "RESUME", "GENERATOR", "LAMBDA", "DB_DIR", "CHECKPOINT_SYNC"))}}
     (run_dir / f"launch-{stamp}.json").write_text(json.dumps(launch, indent=2))

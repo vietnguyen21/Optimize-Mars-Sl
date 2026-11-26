@@ -1,7 +1,10 @@
 """Tests the BIRD split logic and the Colab runner's environment mapping (no BIRD, no GPU)."""
 
+import json
 import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -9,7 +12,10 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from scripts.prepare_bird import build_splits, dedupe, split_by_db, split_cal
-from scripts.colab.run_stage import build_env, parse_overrides
+from pathlib import Path
+
+from scripts.colab.run_stage import (apply_overlay, build_env, check_resume, code_patch, code_provenance,
+                                    overlay_target, parse_overrides)
 
 
 class TestSplits(unittest.TestCase):
@@ -76,6 +82,142 @@ class TestRunnerEnv(unittest.TestCase):
         self.assertEqual((env["MAX_STEPS"], env["LAMBDA_JEPA"]), ("50", "0"))
         with self.assertRaises(ValueError):
             parse_overrides(["MAX_STEPS"])
+
+
+class TestRunnerProvenance(unittest.TestCase):
+    """Temporary git repos only: no Drive, no GPU."""
+
+    def setUp(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        self.git(self.repo, "init", "-q")
+        self.git(self.repo, "config", "core.autocrlf", "false")
+        (self.repo / ".gitignore").write_text("ignored/\n")
+        (self.repo / "a.py").write_bytes(b"print('a')\n")
+        (self.repo / "gone.py").write_bytes(b"x = 1\n")
+        self.git(self.repo, "add", "-A")
+        self.git(self.repo, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                 "commit", "-q", "-m", "init")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def git(repo, *args):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+    def test_clean_vs_dirty(self):
+        clean = code_provenance(self.repo)
+        self.assertFalse(clean["dirty"])
+        self.assertRegex(clean["commit"], "^[0-9a-f]{40}$")
+        (self.repo / "ignored").mkdir()
+        (self.repo / "ignored" / "out.txt").write_text("run output")
+        self.assertEqual(code_provenance(self.repo), clean)
+        (self.repo / "a.py").write_bytes(b"print('b')\n")
+        dirty = code_provenance(self.repo)
+        self.assertTrue(dirty["dirty"])
+        self.assertNotEqual(dirty["code_hash"], clean["code_hash"])
+
+    def test_untracked_file_changes_hash(self):
+        clean = code_provenance(self.repo)
+        (self.repo / "new.py").write_text("y = 2\n")
+        dirty = code_provenance(self.repo)
+        self.assertTrue(dirty["dirty"])
+        self.assertNotEqual(dirty["code_hash"], clean["code_hash"])
+
+    def test_patch_reproduces_working_tree(self):
+        (self.repo / "a.py").write_bytes(b"print('changed')\n")
+        (self.repo / "gone.py").unlink()
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "new.py").write_bytes(b"z = 3\n")
+        (self.repo / "blob.bin").write_bytes(bytes(range(256)))
+        before = code_provenance(self.repo)
+        patch = self.root / "code.patch"
+        patch.write_bytes(code_patch(self.repo, before["commit"]))
+        self.assertEqual(code_provenance(self.repo), before)  # Real index and working tree untouched.
+        staged = subprocess.run(["git", "-C", str(self.repo), "diff", "--cached", "--name-only"],
+                                check=True, capture_output=True).stdout
+        self.assertEqual(staged, b"")
+        copy = self.root / "copy"
+        subprocess.run(["git", "-c", "core.autocrlf=false", "clone", "-q", str(self.repo), str(copy)],
+                       check=True, capture_output=True)
+        self.git(copy, "config", "core.autocrlf", "false")
+        self.git(copy, "checkout", "-q", before["commit"])
+        self.git(copy, "apply", "--binary", str(patch))
+        self.assertEqual(code_provenance(copy)["code_hash"], before["code_hash"])
+        self.assertEqual(code_provenance(copy)["commit"], before["commit"])
+
+    def test_overlay_copies_and_hash_covers_it(self):
+        clean = code_provenance(self.repo)
+        overlay = self.root / "work"
+        (overlay / "pkg").mkdir(parents=True)
+        (overlay / "a.py").write_bytes(b"print('member')\n")
+        (overlay / "pkg" / "b.py").write_bytes(b"b = 1\n")
+        apply_overlay(overlay, self.repo)
+        self.assertEqual((self.repo / "a.py").read_bytes(), b"print('member')\n")
+        self.assertEqual((self.repo / "pkg" / "b.py").read_bytes(), b"b = 1\n")
+        self.assertNotEqual(code_provenance(self.repo)["code_hash"], clean["code_hash"])
+
+    def test_overlay_escape_refused(self):
+        root = self.repo.resolve()
+        for rel in ("../evil.py", "pkg/../../evil.py", str(self.root.resolve() / "evil.py"), ".git/config"):
+            with self.assertRaises(SystemExit, msg=rel):
+                overlay_target(root, rel)
+        overlay = self.root / "work"
+        (overlay / ".git").mkdir(parents=True)
+        (overlay / "a.py").write_bytes(b"print('x')\n")
+        (overlay / ".git" / "config").write_text("[core]")
+        with self.assertRaises(SystemExit):
+            apply_overlay(overlay, self.repo)
+        self.assertEqual((self.repo / "a.py").read_bytes(), b"print('a')\n")  # Nothing copied on refusal.
+
+    def test_overlay_symlink_refused(self):
+        outside = self.root / "secret.txt"
+        outside.write_text("secret")
+        overlay = self.root / "work"
+        overlay.mkdir()
+        try:
+            os.symlink(outside, overlay / "link.py")
+            os.symlink(self.root, self.repo / "out")
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks cannot be created here")
+        with self.assertRaises(SystemExit):
+            apply_overlay(overlay, self.repo)
+        (overlay / "link.py").unlink()
+        (overlay / "out").mkdir()
+        (overlay / "out" / "x.py").write_text("x")  # Repo symlink "out" points outside the repo.
+        with self.assertRaises(SystemExit):
+            apply_overlay(overlay, self.repo)
+        self.assertFalse((self.root / "x.py").exists())
+
+    def test_resume_refused_on_other_code(self):
+        run_dir = self.root / "run"
+        (run_dir / "checkpoint-25").mkdir(parents=True)
+        with self.assertRaises(SystemExit) as ctx:
+            check_resume(run_dir, "new")
+        self.assertIn("none", str(ctx.exception.code))
+        (run_dir / "launch-20260101-000000.json").write_text(json.dumps({"code_hash": "new"}))
+        (run_dir / "launch-20260102-000000.json").write_text(json.dumps({"code_hash": "old"}))
+        with self.assertRaises(SystemExit) as ctx:
+            check_resume(run_dir, "new")
+        self.assertIn("old", str(ctx.exception.code))
+        self.assertIn("new", str(ctx.exception.code))
+        check_resume(run_dir, "old")
+        check_resume(self.root / "fresh", "anything")  # No checkpoint: nothing to resume.
+
+    def test_unknown_commit_is_an_error(self):
+        empty = self.root / "empty"
+        empty.mkdir()
+        with self.assertRaises(SystemExit) as ctx:
+            code_provenance(empty)  # Not a git repo.
+        self.assertIn("Cannot resolve the code commit", str(ctx.exception.code))
+        self.git(empty, "init", "-q")
+        with self.assertRaises(SystemExit):
+            code_provenance(empty)  # Repo without HEAD.
 
 
 class TestPipCheckFilter(unittest.TestCase):

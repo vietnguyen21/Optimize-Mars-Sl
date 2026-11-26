@@ -30,6 +30,17 @@ Database SQLite (khoảng 32 GB) được giải nén vào `/content/bird_db` �
 | `system1` | 04 | Cần dữ liệu `decision_*.jsonl` sinh từ generator đã train |
 | `evaluation` | 05 | Cần các checkpoint đã chấp nhận |
 
+## Overlay và truy vết code
+
+- `--overlay <thư mục>` (ô `OVERLAY` trong launcher, để trống = không dùng): chép mọi file của thư mục đè lên repo
+  trước khi chạy, ví dụ `MyDrive/Text2SQL_Colab/members/m4/work`. Từ chối đường dẫn thoát ra ngoài repo (`..`,
+  đường dẫn tuyệt đối, symlink) và mọi file vào `.git/`.
+- Mỗi `launch-*.json` ghi `commit`, `dirty`, `code_hash` (sha256 trên mọi file tracked và untracked không bị ignore),
+  `overlay`, `patch`. File `code-<stamp>.patch` trong thư mục run dựng lại đúng code: checkout `commit` rồi `git apply`.
+  Không xác định được commit (không có git) thì script dừng với lỗi.
+- Resume: nếu thư mục run đã có checkpoint mà `code_hash` khác với `launch-*.json` mới nhất (hoặc file đó không có
+  `code_hash`), script dừng trước khi chạy notebook. Muốn chạy code khác thì dùng `RUN_ID` mới.
+
 ## Quyết định đã chốt
 
 - Generator mặc định: `Qwen/Qwen2.5-Coder-3B-Instruct` (không gated). Đổi bằng `--set GENERATOR_MODEL=...`.
