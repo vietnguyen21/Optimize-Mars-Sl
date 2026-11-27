@@ -54,7 +54,6 @@ from src.training.train_sft_generator import (
 from src.training.train_grpo_generator import (
     compute_format_reward,
     compute_exec_reward,
-    compute_mem_reward,
     compute_atomic_reward,
     compute_dense_rewards,
     normalize_group_advantages,
@@ -338,8 +337,7 @@ class TestDenseGRPORewardsAndAdvantageCollapse(unittest.TestCase):
     def test_hostile_all_rollouts_fail_execution_resilience(self):
         """
         Hostile Scenario: 100% of candidate rollouts fail execution (R_exec == 0.0).
-        Verify that R_format, R_mem, R_atomic maintain non-zero variance,
-        strictly preventing Advantage Collapse.
+        Verify that diagnostic heads cannot invent nonzero optimization reward.
         """
         cands = [
             # Cand 0: Perfect formatting, high reasoning overlap, AST clause overlap, but invalid SQL syntax
@@ -364,16 +362,10 @@ class TestDenseGRPORewardsAndAdvantageCollapse(unittest.TestCase):
         for i, ev in enumerate(res["evaluations"]):
             self.assertEqual(ev["r_exec"], 0.0, f"Candidate {i} unexpectedly had non-zero execution reward!")
 
-        # 2. Empirically verify rewards are not all identical
-        raw_rewards = res["raw_rewards"]
-        self.assertTrue(res["advantage_collapse_prevented"], "Advantage collapse was not prevented!")
-        self.assertGreater(max(raw_rewards), min(raw_rewards))
-
-        # 3. Verify normalized advantages produce clean positive and negative policy updates
-        advantages = res["advantages"]
-        self.assertGreater(max(advantages), 0.0)
-        self.assertLess(min(advantages), 0.0)
-        self.assertAlmostEqual(sum(advantages) / len(advantages), 0.0, places=3)
+        # Arctic provides no invented signal for equally incorrect candidates.
+        self.assertEqual(res["raw_rewards"], [0.0] * 4)
+        self.assertFalse(res["advantage_collapse_prevented"])
+        self.assertEqual(res["advantages"], [0.0] * 4)
 
     def test_hostile_all_identical_rollouts_division_by_zero_safety(self):
         """

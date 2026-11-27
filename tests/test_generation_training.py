@@ -130,7 +130,7 @@ class TestTinyGenerationTraining(unittest.TestCase):
         loss = grpo_token_objective(new, new.detach(), torch.tensor([-8.0]),
                                     1.0, beta_kl=0.0)
         loss.backward()
-        self.assertAlmostEqual(new.grad.item(), -1.0, places=5)
+        self.assertAlmostEqual(new.grad.item(), -1.0 / 256, places=7)
 
     def test_jepa_detaches_targets(self):
         from src.training.jepa_module import LLM_JEPAModule
@@ -211,7 +211,7 @@ class TestTinyGenerationTraining(unittest.TestCase):
                 # This test isolates policy optimization. SQL reward correctness is
                 # tested separately against real SQLite; the model still samples.
                 score = sum(int(x) for x in response.split(",")) % 13
-                return dict(r_format=0., r_exec=0., r_mem=0., r_atomic=float(score), total_reward=float(score))
+                return dict(r_format=0., r_exec=float(score), r_atomic=0., total_reward=float(score))
             common = dict(data_path=str(data), db_dir=str(root), sft_checkpoint=str(sft),
                 device="cpu", epochs=3, max_length=512, max_new_tokens=3,
                 num_rollouts=4, learning_rate=0.01, save_steps=50, seed=42)
@@ -322,7 +322,7 @@ class TestNativeLlamaPeftTraining(unittest.TestCase):
             conn.close()
             def reward(response, *args):
                 score = sum(map(ord, response)) % 19
-                return dict(r_format=0., r_exec=0., r_mem=0., r_atomic=float(score), total_reward=float(score))
+                return dict(r_format=0., r_exec=float(score), r_atomic=0., total_reward=float(score))
             common = dict(data_path=str(grpo_data), db_dir=str(root), sft_checkpoint=sft["checkpoint_path"],
                 device="cpu", epochs=3, max_length=256, max_new_tokens=4,
                 num_rollouts=4, learning_rate=0.001, save_steps=50, seed=42)
@@ -347,7 +347,7 @@ class TestNativeLlamaPeftTraining(unittest.TestCase):
     def test_private_hub_sft_and_grpo_resume_into_new_session(self):
         """Native PEFT/JEPA recovery over the mocked Hub, with original paths absent."""
         import os
-        from test_checkpoint_sync import Hub
+        from tests.test_checkpoint_sync import Hub
         from safetensors.torch import load_file
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -403,7 +403,7 @@ class TestNativeLlamaPeftTraining(unittest.TestCase):
                 conn.execute('CREATE TABLE t(x)'); conn.close()
                 def reward(response, *args):
                     score = sum(map(ord, response)) % 19
-                    return dict(r_format=0., r_exec=0., r_mem=0., r_atomic=float(score), total_reward=float(score))
+                    return dict(r_format=0., r_exec=float(score), r_atomic=0., total_reward=float(score))
                 grpo_common = dict(data_path=str(grpo_data), db_dir=str(dbs), device='cpu',
                     epochs=3, max_length=256, max_new_tokens=4, num_rollouts=4,
                     learning_rate=0.001, save_steps=1, seed=42)

@@ -1,16 +1,7 @@
-"""
-Dense GRPO (Group Relative Policy Optimization) Trainer for Text-to-SQL SLMs.
-
-Implements FINER-SQL Dense GRPO with 4 fine-grained reward heads:
-  1. R_format in {0, 1}: Binary reward for well-formed <think>...</think><answer>...</answer> tags.
-  2. R_exec in {0, 1, 2}: Execution reward on target SQLite database (0: error, 1: valid run, 2: 100% gold match).
-  3. R_mem in [0, 1]: Soft semantic thought-matching reward against Reasoning Bank patterns.
-  4. R_atomic in [0, 1]: AST clause matching reward (SELECT, FROM, WHERE, GROUP BY, ORDER BY).
-
-Normalizes informative groups; zero-variance groups have zero advantages and are skipped:
-  A_j = (R_j - mean(R)) / (std(R) + eps).
-
-Supports full TRL / custom GRPO execution and standalone --dry_run mode on data/mini/.
+"""Arctic execution reward and Dr. GRPO for Text-to-SQL (W1/U17/U18).
+Only execution reward is optimized; format and AST scores are diagnostics.
+Groups use centered rewards, without standard-deviation normalization.
+Explicit dry-run fixtures remain smoke tests, never model results.
 """
 
 import os
@@ -31,6 +22,9 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from src.training.callbacks import DriveCheckpointCallback, get_resume_checkpoint
+from src.training.grpo_reward import (GoldExecutionError, GoldExecutionMonitor,
+    load_gold_rows, compute_arctic_reward, dr_grpo_advantages, dr_grpo_token_objective)
+import time
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -57,7 +51,7 @@ def compute_format_reward(generation_text: str) -> float:
       - Valid <think>...</think> pair; it may be empty (the v2 SFT target).
       - Valid <answer>...</answer> pair with non-whitespace content.
       - <think> appears before <answer>.
-    
+
     Returns:
         1.0 if all conditions are met, otherwise 0.0.
     """
@@ -101,94 +95,12 @@ def execute_sqlite_query(query, db_path, timeout=3.0):
     return (True, rows, None) if ok else (False, None, str(rows))
 
 
-def compute_exec_reward(
-    candidate_sql: str,
-    gold_sql: str,
-    db_path: str,
-    timeout: float = 3.0
-) -> float:
-    """
-    Evaluates SQLite execution:
-      - 0.0: Syntax or runtime execution error on SQLite.
-      - 1.0: Executes cleanly without error, but results do not match gold query.
-      - 2.0: Executes cleanly and result set matches gold query 100%.
-    """
-    cand_ok, cand_rows, _ = execute_sqlite_query(candidate_sql, db_path, timeout=timeout)
-    if not cand_ok:
-        return 0.0
-
-    gold_ok, gold_rows, _ = execute_sqlite_query(gold_sql, db_path, timeout=timeout)
-    if not gold_ok:
-        # If gold query itself cannot run, treat clean candidate execution as valid SQL (1.0)
-        return 1.0
-
-    from src.evaluation.metrics import compare_sql_results
-    if compare_sql_results(cand_rows, gold_rows):
-        return 2.0
-
-    return 1.0
-
-
-# ---------------------------------------------------------------------------
-# 3. Reward Head 3: Memory / Thought Matching Reward (R_mem)
-# ---------------------------------------------------------------------------
-
-def compute_mem_reward(
-    candidate_think: str,
-    gold_think: Optional[str] = None,
-    reasoning_bank: Optional[Union[List[str], str]] = None,
-    **kwargs: Any
-) -> float:
-    """
-    Soft reward matching candidate thought reasoning against Reasoning Bank reference.
-    Computes token-level Jaccard similarity and schema-entity coverage.
-    Supports candidate strings with or without <think> tags.
-    
-    Returns:
-        Float in [0.0, 1.0].
-    """
-    if "<think>" in candidate_think:
-        m = re.search(r"<think>(.*?)</think>", candidate_think, re.DOTALL)
-        cand_text = m.group(1).strip() if m else candidate_think
-    else:
-        cand_text = candidate_think
-
-    if gold_think is not None:
-        gold_text = gold_think
-    elif reasoning_bank is not None:
-        gold_text = "\n".join(reasoning_bank) if isinstance(reasoning_bank, list) else str(reasoning_bank)
-    else:
-        gold_text = ""
-
-    if not cand_text or not gold_text:
-        return 0.0
-
-    # Normalize words
-    def tokenize(text: str) -> set:
-        words = re.findall(r"\b[A-Za-z0-9_]+\b", text.lower())
-        return set(words)
-
-    c_words = tokenize(cand_text)
-    g_words = tokenize(gold_text)
-
-    if not c_words or not g_words:
-        return 0.0
-
-    intersection = len(c_words & g_words)
-    union = len(c_words | g_words)
-    jaccard = intersection / max(union, 1)
-
-    # Key SQL reasoning concepts: table names, join, where, group, order, sum, avg, count
-    sql_keywords = {"join", "where", "group", "order", "sum", "avg", "count", "max", "min", "filter", "select", "bridge"}
-    g_keys = g_words & sql_keywords
-    if g_keys:
-        key_recall = len(c_words & g_keys) / len(g_keys)
-    else:
-        key_recall = jaccard
-
-    # Combined soft score
-    score = 0.5 * jaccard + 0.5 * key_recall
-    return round(min(max(score, 0.0), 1.0), 4)
+def compute_exec_reward(candidate_sql: str, gold_sql: str, db_path: str,
+                        timeout: float = 5.0) -> float:
+    """Compatibility API for SQL-only callers; invalid gold raises and is excluded."""
+    gold_rows = load_gold_rows(gold_sql, db_path, timeout=30.0)
+    return compute_arctic_reward(f"<answer>{candidate_sql}</answer>", gold_rows,
+                                 db_path, timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +145,7 @@ def extract_sql_clauses(sql: str) -> Dict[str, set]:
     # Regex patterns for clause boundaries
     pattern = r"(SELECT|FROM|WHERE|GROUP BY|ORDER BY|LIMIT|HAVING)\b"
     splits = re.split(pattern, cleaned)
-    
+
     current_clause = None
     for part in splits:
         p = part.strip()
@@ -296,73 +208,26 @@ def compute_atomic_reward(candidate_sql: str, gold_sql: str) -> float:
 # 5. Composite Reward & Group Advantage Normalization
 # ---------------------------------------------------------------------------
 
-def compute_dense_rewards(
-    generation_text: str,
-    gold_sql: str,
-    gold_think: str,
-    db_path: str
-) -> Dict[str, float]:
-    """
-    Computes all 4 fine-grained reward heads for a single candidate generation.
-    """
-    r_format = compute_format_reward(generation_text)
-
-    # Extract answer and think from generation
-    cand_sql = ""
-    cand_think = ""
-    ans_match = re.search(r"<answer>(.*?)</answer>", generation_text, re.DOTALL)
-    if ans_match:
-        cand_sql = ans_match.group(1).strip()
-    think_match = re.search(r"<think>(.*?)</think>", generation_text, re.DOTALL)
-    if think_match:
-        cand_think = think_match.group(1).strip()
-
-    r_exec = compute_exec_reward(cand_sql, gold_sql, db_path) if cand_sql else 0.0
-    r_mem = compute_mem_reward(cand_think, gold_think) if cand_think else 0.0
-    r_atomic = compute_atomic_reward(cand_sql, gold_sql) if cand_sql else 0.0
-
-    total_reward = r_format + r_exec + r_mem + r_atomic
-
-    return {
-        "r_format": r_format,
-        "r_exec": r_exec,
-        "r_mem": r_mem,
-        "r_atomic": r_atomic,
-        "total_reward": round(total_reward, 4)
-    }
+def compute_dense_rewards(generation_text: str, gold_sql: str, gold_think: str,
+                           db_path: str) -> Dict[str, float]:
+    """Arctic scalar plus diagnostic heads; gold_think is unused API compatibility."""
+    gold_rows = load_gold_rows(gold_sql, db_path, timeout=30.0)
+    answer = re.search(r"<answer>(.*?)</answer>", generation_text or "", re.DOTALL)
+    candidate_sql = answer.group(1).strip() if answer else ""
+    execution = compute_arctic_reward(generation_text, gold_rows, db_path, timeout=5.0)
+    return {"r_format": compute_format_reward(generation_text),
+            "r_exec": execution,
+            "r_atomic": compute_atomic_reward(candidate_sql, gold_sql) if candidate_sql else 0.0,
+            "total_reward": execution}
 
 
-def normalize_group_advantages(
-    rewards: List[float],
-    eps: float = 1e-8,
-    epsilon: Optional[float] = None,
-    **kwargs: Any
-) -> List[float]:
-    """
-    Normalizes rewards across a group of G sampled rollouts to resolve Advantage Collapse.
-    
-    Formula:
-      mean_R = sum(rewards) / G
-      std_R = sqrt(sum((r - mean_R)^2) / G) + eps
-      A_j = (r_j - mean_R) / std_R
-    """
+def normalize_group_advantages(rewards: List[float], eps: float = 1e-8,
+                               epsilon: Optional[float] = None, **kwargs: Any) -> List[float]:
+    """Legacy name for Dr. GRPO centering; epsilon is validated, not used to scale."""
     effective_eps = epsilon if epsilon is not None else eps
-    g = len(rewards)
-    if g == 0:
-        return []
-    if g == 1:
-        return [0.0]
-
-    mean_r = sum(rewards) / g
-    var_r = sum((r - mean_r) ** 2 for r in rewards) / g
-    if effective_eps <= 0 or not all(math.isfinite(r) for r in rewards):
-        raise ValueError("Advantages require finite rewards and positive epsilon")
-    if var_r <= effective_eps ** 2:
-        return [0.0] * g
-    std_r = math.sqrt(var_r) + effective_eps
-
-    advantages = [(r - mean_r) / std_r for r in rewards]
-    return advantages
+    if effective_eps <= 0:
+        raise ValueError("epsilon must be positive")
+    return dr_grpo_advantages(rewards)
 
 
 def compute_grpo_loss(
@@ -370,12 +235,12 @@ def compute_grpo_loss(
     ref_logprobs: List[float],
     advantages: List[float],
     clip_eps: float = 0.2,
-    beta_kl: float = 0.04,
-    old_logprobs: Optional[List[float]] = None
+    beta_kl: float = 0.001,
+    old_logprobs: Optional[List[float]] = None, norm_constant: float = 256
 ) -> float:
     """
     Computes GRPO clipped policy surrogate loss with KL penalty.
-    
+
     L_GRPO = - 1/G * sum( min( ratio * A, clip(ratio, 1-eps, 1+eps) * A ) ) + beta * D_KL
     """
     g = len(logprobs)
@@ -392,13 +257,15 @@ def compute_grpo_loss(
         surr1 = ratio * adv
         surr2 = max(min(ratio, 1.0 + clip_eps), 1.0 - clip_eps) * adv
         policy_loss = -min(surr1, surr2)
-        
+
         # KL divergence approx: ref_lp - lp or exp(ref_lp - lp) - (ref_lp - lp) - 1
         kl_div = math.exp(ref_lp - lp) - (ref_lp - lp) - 1.0
         step_loss = policy_loss + beta_kl * max(kl_div, 0.0)
         losses.append(step_loss)
 
-    return sum(losses) / g
+    if not math.isfinite(norm_constant) or norm_constant <= 0:
+        raise ValueError("norm_constant must be positive and finite")
+    return sum(losses) / norm_constant
 
 
 # ---------------------------------------------------------------------------
@@ -408,14 +275,14 @@ def compute_grpo_loss(
 class DenseGRPOTrainer:
     """
     Dense GRPO Trainer coordinating multi-candidate rollouts,
-    4-head reward computation, advantage normalization, and policy update.
+    Arctic reward computation, centered advantages, and policy update.
     """
     def __init__(
         self,
         model_name_or_path: str = "FINER-SQL-3B",
         group_size: int = 4,
         clip_eps: float = 0.2,
-        beta_kl: float = 0.04,
+        beta_kl: float = 0.001,
         learning_rate: float = 1e-6
     ):
         self.model_name_or_path = model_name_or_path
@@ -432,7 +299,7 @@ class DenseGRPOTrainer:
         db_path: str
     ) -> Dict[str, Any]:
         """
-        Evaluates a group of G candidates, computes 4 rewards per candidate,
+        Evaluates a group of G candidates with Arctic reward and diagnostic heads,
         normalizes group advantages, and computes policy loss.
         """
         evaluations = []
@@ -470,7 +337,7 @@ def run_dry_run(
        - Cand 1: Valid SQL with wrong WHERE condition (PartialScore).
        - Cand 2: SQL with syntax error (LowScore).
        - Cand 3: Corrupt formatting missing </answer> (ZeroFormat).
-    3. Evaluates all 4 reward heads against actual SQLite databases.
+    3. Evaluates Arctic reward and diagnostic heads against actual SQLite databases.
     4. Normalizes group advantages and verifies Advantage Collapse is solved.
     5. Computes GRPO surrogate loss.
     """
@@ -533,7 +400,7 @@ def run_dry_run(
         "verified_queries": verified_queries,
         "group_size": group_size,
         "advantage_collapse_prevented": True,
-        "reward_heads": ["r_format", "r_exec", "r_mem", "r_atomic"]
+        "reward_heads": ["r_format", "r_exec", "r_atomic"]
     }
 
 
@@ -548,19 +415,10 @@ def completion_token_logprobs(model, token_ids, prompt_length, temperature=1.0):
 
 
 def grpo_token_objective(new_logprobs, old_logprobs, reference_logprobs, advantage,
-                         clip_eps=0.2, beta_kl=0.04):
-    """Differentiable clipped tokenwise GRPO with k3 reference KL estimator.
-
-    Old-policy probabilities are sampled before ANY group optimizer update.
-    The immutable SFT reference is used only by KL. EOS is included and padding
-    excluded by passing one unpadded response at a time.
-    """
-    ratio = (new_logprobs - old_logprobs.detach()).exp()
-    surrogate = torch.minimum(ratio * advantage,
-        ratio.clamp(1 - clip_eps, 1 + clip_eps) * advantage)
-    delta = reference_logprobs.detach() - new_logprobs
-    kl = delta.exp() - delta - 1
-    return (-surrogate + beta_kl * kl).mean()
+                         clip_eps=0.2, beta_kl=0.001, norm_constant=256):
+    """Legacy call order, delegating token-sum normalization to the W1 objective."""
+    return dr_grpo_token_objective(new_logprobs, old_logprobs, reference_logprobs,
+        advantage, norm_constant=norm_constant, clip_eps=clip_eps, beta_kl=beta_kl)
 
 
 def _schema_for_record(record, db_path):
@@ -592,7 +450,7 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
 
     One shared frozen NF4 base holds trainable policy and immutable reference
     LoRA adapters. Responses are sampled from the model without gold SQL; labels
-    are used exclusively for the four rewards. Zero-variance groups are skipped,
+    are used exclusively in the private execution evaluator and diagnostic heads. Zero-variance groups are skipped,
     not perturbed to manufacture advantages. Checkpoints include both adapters.
     """
     group_size = int(kwargs.get("group_size", num_rollouts))
@@ -621,10 +479,10 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
     save_steps = int(kwargs.get("save_steps", 25))
     accum = int(kwargs.get("gradient_accumulation_steps", 1))
     max_length = int(kwargs.get("max_length", 1024))
-    max_new_tokens = int(kwargs.get("max_new_tokens", 128))
+    max_new_tokens = int(kwargs.get("max_new_tokens", 256))
     seed = int(kwargs.get("seed", 42))
     clip_eps = float(kwargs.get("clip_eps", 0.2))
-    beta_kl = float(kwargs.get("beta_kl", 0.04))
+    beta_kl = float(kwargs.get("beta_kl", 0.001))
     temperature = float(kwargs.get("temperature", 1.0))
     if min(max_steps, save_steps, accum, max_new_tokens, epochs) <= 0 or group_size < 2:
         raise ValueError("GRPO needs positive counts and at least two sampled responses per group")
@@ -653,12 +511,16 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
         ("adapter_model.safetensors", "adapter_model.bin") if (reference_source / name).exists()), None)
     if reference_weights is None:
         raise FileNotFoundError("Missing reference SFT adapter weights")
-    contract = dict(group_size=group_size, accumulation=accum, max_length=max_length,
+    contract = dict(reward_version="arctic-dr-grpo-v1", candidate_timeout=5.0, gold_timeout=30.0,
+        group_size=group_size, accumulation=accum, max_length=max_length,
         max_new_tokens=max_new_tokens, seed=seed, beta_kl=beta_kl, clip_eps=clip_eps,
         temperature=temperature, learning_rate=learning_rate, prompt_format=prompt_format,
         reference_sha256=dataset_fingerprint(reference_weights))
     logger = ExperimentLogger(output_dir, dict(stage="grpo", mode="train", **contract))
     step, first_epoch, first_index = 0, 0, 0
+    gold_monitor = GoldExecutionMonitor()
+    groups_seen = 0
+    restored_counts = {}
     if resume:
         state = load_checkpoint(resume, model, optimizer, scaler=scaler,
             expected_extra=dict(kind='grpo', dataset_fingerprint=fingerprint, contract=contract))
@@ -666,10 +528,15 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
         if extra.get("kind") != "grpo" or extra.get("dataset_fingerprint") != fingerprint or extra.get("contract") != contract:
             raise ValueError("Resume checkpoint belongs to another GRPO dataset/configuration")
         step, first_epoch, first_index = state["step"], extra["epoch"], extra["batch_index"]
+        gold_monitor = GoldExecutionMonitor.from_state(extra.get("gold_monitor"))
+        restored_counts = extra.get("group_counts", {})
+        groups_seen = restored_counts.get("groups_seen", 0)
     optimizer.zero_grad(set_to_none=True)
     checkpoint = resume
     last_saved_step = step if resume else None
-    skipped_zero, skipped_long, pending = 0, 0, 0
+    skipped_zero = restored_counts.get("skipped_zero", 0)
+    skipped_long = restored_counts.get("skipped_long", 0)
+    pending = 0
     epoch, next_index = first_epoch, first_index
     for epoch in range(first_epoch, int(epochs)):
         order = list(range(len(rows)))
@@ -689,6 +556,9 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
                 logger.log(event="skip_overlength", epoch=epoch, record_index=record_index)
                 continue
             samples, rewards = [], []
+            group_started = time.perf_counter()
+            invalid_gold = False
+            question_key = item.get("question_id", order[record_index])
             _activate_adapter(model, "default")
             model.eval()
             for _ in range(group_size):
@@ -707,11 +577,28 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
                     _activate_adapter(model, "reference")
                     ref = completion_token_logprobs(model, generated, prompt_ids.shape[1], temperature)
                     _activate_adapter(model, "default")
-                reward = compute_dense_rewards(response, item.get("SQL", item.get("answer", item.get("sql", ""))),
-                    item.get("think_steps", item.get("reasoning", "")), db_path)
+                try:
+                    reward = compute_dense_rewards(response, item.get("SQL", item.get("answer", item.get("sql", ""))),
+                        item.get("think_steps", item.get("reasoning", "")), db_path)
+                except GoldExecutionError as exc:
+                    gold_monitor.observe(question_key, failed=True)
+                    logger.log(event="skip_gold_error", epoch=epoch, record_index=record_index,
+                        gold_errors=gold_monitor.failed, gold_attempted=gold_monitor.attempted,
+                        gold_error_fraction=gold_monitor.fraction, error=str(exc))
+                    del generated, old, ref
+                    gold_monitor.check()
+                    invalid_gold = True
+                    break
+                gold_monitor.observe(question_key, failed=False)
+                gold_monitor.check()
                 rewards.append(reward)
                 samples.append((generated.detach().cpu(), old.cpu(), ref.cpu()))
                 del generated, old, ref
+            if invalid_gold:
+                del samples, prompt_ids
+                continue
+            groups_seen += 1
+            lengths = [int(ids.shape[1] - prompt_ids.shape[1]) for ids, _, _ in samples]
             advantages = normalize_group_advantages([r["total_reward"] for r in rewards])
             if not any(advantages):
                 skipped_zero += 1
@@ -726,7 +613,7 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
                             enabled=str(device).startswith("cuda")):
                         new = completion_token_logprobs(model, ids.to(device), prompt_ids.shape[1], temperature)
                         loss = grpo_token_objective(new, old.to(device), ref.to(device), advantage,
-                                                    clip_eps, beta_kl) / group_size
+                            clip_eps=clip_eps, beta_kl=beta_kl, norm_constant=max_new_tokens) / group_size
                     if not torch.isfinite(loss):
                         raise FloatingPointError("Nonfinite GRPO objective")
                     scaler.scale(loss).backward()
@@ -736,7 +623,17 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
                 logger.log(step=step, epoch=epoch, group_loss=group_loss,
                     rewards=[r["total_reward"] for r in rewards], advantages=advantages,
                     **{head: sum(r[head] for r in rewards) / group_size for head in
-                       ("r_format", "r_exec", "r_mem", "r_atomic")})
+                       ("r_format", "r_exec", "r_atomic")})
+            mean_reward = sum(r["total_reward"] for r in rewards) / group_size
+            logger.log(event="grpo_group", step=step, epoch=epoch,
+                mean_reward=mean_reward,
+                reward_std=math.sqrt(sum((r["total_reward"] - mean_reward) ** 2 for r in rewards) / group_size),
+                mean_completion_len=sum(lengths) / group_size,
+                frac_zero_std_groups=skipped_zero / groups_seen,
+                kl=sum(float(((ref - old).exp() - (ref - old) - 1).sum())
+                       for _, old, ref in samples) / (group_size * max_new_tokens),
+                s_per_group=time.perf_counter() - group_started,
+                gold_errors=gold_monitor.failed, gold_attempted=gold_monitor.attempted)
             del samples, prompt_ids
             if pending and (pending == accum or next_index == len(order)):
                 updated = _optimizer_update(parameters, optimizer, scaler, pending)
@@ -749,7 +646,9 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
                     checkpoint = save_checkpoint(output_dir, model, optimizer, step, scaler=scaler,
                         tokenizer=tokenizer, extra=_generation_extra("grpo", fingerprint,
                             epoch + int(next_index == len(order)), 0 if next_index == len(order) else next_index,
-                            contract=contract))
+                            contract=contract, gold_monitor=gold_monitor.state(),
+                            group_counts=dict(groups_seen=groups_seen, skipped_zero=skipped_zero,
+                                              skipped_long=skipped_long)))
                     last_saved_step = step
         # Flush a partial window even when the last records were overlength/skipped.
         if pending:
@@ -763,7 +662,9 @@ def run_grpo_training(data_path="data/mini/mini_bird.jsonl", db_dir="data/mini",
         checkpoint = save_checkpoint(output_dir, model, optimizer, step, scaler=scaler,
             tokenizer=tokenizer, extra=_generation_extra("grpo", fingerprint,
                 epoch + int(next_index == len(order)), 0 if next_index == len(order) else next_index,
-                            contract=contract))
+                            contract=contract, gold_monitor=gold_monitor.state(),
+                            group_counts=dict(groups_seen=groups_seen, skipped_zero=skipped_zero,
+                                              skipped_long=skipped_long)))
     result = dict(status="COMPLETED" if step > 0 else "NO_POLICY_UPDATES", mode="train",
         trained=step > 0, optimizer_steps=step, checkpoint_path=checkpoint,
         skipped_zero_variance=skipped_zero, skipped_overlength=skipped_long)
@@ -783,10 +684,10 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=5e-6)
     parser.add_argument("--clip_eps", type=float, default=0.2)
-    parser.add_argument("--beta_kl", type=float, default=0.04)
+    parser.add_argument("--beta_kl", type=float, default=0.001)
     parser.add_argument("--max_steps", type=int, default=100)
     parser.add_argument("--max_length", type=int, default=1024)
-    parser.add_argument("--max_new_tokens", type=int, default=128)
+    parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--save_steps", type=int, default=25)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)

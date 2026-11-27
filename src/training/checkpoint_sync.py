@@ -434,7 +434,7 @@ STAGE_DEFAULTS = {
         lambda_jepa=1.0, loss_dropout=0.5, predictor_dim=256, lora_rank=16,
         model_name_or_path='meta-llama/Llama-3.2-3B-Instruct'),
     'grpo_3b': dict(max_length=1024, seed=42, gradient_accumulation_steps=1,
-        max_new_tokens=128, clip_eps=0.2, beta_kl=0.04, temperature=1.0,
+        max_new_tokens=256, clip_eps=0.2, beta_kl=0.001, temperature=1.0,
         lora_rank=16, model_name_or_path='meta-llama/Llama-3.2-3B-Instruct'),
 }
 

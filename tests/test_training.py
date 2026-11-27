@@ -43,7 +43,6 @@ from src.training.train_sft_generator import (
 from src.training.train_grpo_generator import (
     compute_format_reward,
     compute_exec_reward,
-    compute_mem_reward,
     compute_atomic_reward,
     compute_dense_rewards,
     normalize_group_advantages,
@@ -306,20 +305,19 @@ class TestDenseGRPOTrainer(unittest.TestCase):
         r_wrong = compute_exec_reward(cand_wrong_res, gold_sql, db_path)
         r_err = compute_exec_reward(cand_syntax_err, gold_sql, db_path)
 
-        self.assertEqual(r_exact, 2.0)
-        self.assertEqual(r_wrong, 1.0)
+        self.assertEqual(r_exact, 1.0)
+        self.assertEqual(r_wrong, 0.1)
         self.assertEqual(r_err, 0.0)
 
-    def test_mem_reward(self):
-        gold_think = "Join clients with accounts on client_id and filter card_type = 'gold'."
-        similar_think = "We need to join clients and accounts using client_id and check card_type."
-        unrelated_think = "Calculate average math scores in Los Angeles county."
-
-        r_sim = compute_mem_reward(similar_think, gold_think)
-        r_unrelated = compute_mem_reward(unrelated_think, gold_think)
-
-        self.assertGreater(r_sim, r_unrelated)
-        self.assertGreater(r_sim, 0.3)
+    def test_removed_thought_reward_cannot_change_total(self):
+        db = "data/mini/financial_mini.sqlite"
+        sql = "SELECT client_id, name FROM clients WHERE district_id = 1"
+        text = f"<think></think><answer>{sql}</answer>"
+        first = compute_dense_rewards(text, sql, "copied evidence", db)
+        second = compute_dense_rewards(text, sql, "unrelated text", db)
+        self.assertEqual(first["total_reward"], 1.0)
+        self.assertEqual(first, second)
+        self.assertNotIn("r_mem", first)
 
     def test_atomic_reward(self):
         sql1 = "SELECT T1.name FROM clients AS T1 JOIN accounts AS T2 ON T1.client_id = T2.client_id WHERE T2.balance > 1000;"
