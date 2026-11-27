@@ -545,6 +545,8 @@ def run_sft_training(
     last_saved_step = step if resume else None
     epoch, next_batch = first_epoch, first_batch
     model.train()
+    if step == 0 and str(device).startswith("cuda"):
+        torch.cuda.reset_peak_memory_stats(device)
     for epoch in range(first_epoch, int(epochs)):
         order = list(range(len(encoded)))
         random.Random(seed + epoch).shuffle(order)
@@ -569,6 +571,7 @@ def run_sft_training(
                 if updated:
                     step += 1
                 logger.log(step=step, epoch=epoch, loss=float(loss.detach()),
+                           peak_vram_bytes=torch.cuda.max_memory_allocated(device) if str(device).startswith("cuda") else None,
                            optimizer_updated=updated, **metrics)
                 if updated and step % save_steps == 0:
                     checkpoint = save_checkpoint(output_dir, model, optimizer, step, scaler=scaler,

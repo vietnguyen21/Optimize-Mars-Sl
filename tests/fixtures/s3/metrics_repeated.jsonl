@@ -1,0 +1,9 @@
+{"event": "config", "config": {"stage": "sft", "max_length": 2048, "dropped_overlength": 2, "learning_rate": 0.0002}, "time_unix": 1}
+{"step": 0, "optimizer_updated": false, "time_unix": 4, "epoch": 0, "loss": 1.0, "ce_loss": 1.0, "jepa_loss": 0.0}
+{"step": 1, "optimizer_updated": true, "time_unix": 10, "epoch": 0, "loss": 1.0, "ce_loss": 1.0, "jepa_loss": 0.0, "peak_vram_bytes": 1073741824}
+{"step": 1, "optimizer_updated": false, "time_unix": 12, "epoch": 0, "loss": 1.0, "ce_loss": 1.0, "jepa_loss": 0.0, "peak_vram_bytes": 8589934592}
+{"step": 1, "optimizer_updated": true, "time_unix": 14, "epoch": 0, "loss": 1.0, "ce_loss": 1.0, "jepa_loss": 0.0, "peak_vram_bytes": 7516192768}
+{"step": 2, "optimizer_updated": false, "time_unix": 16, "epoch": 0, "loss": 1.0, "ce_loss": 1.0, "jepa_loss": 0.0}
+{"step": 2, "optimizer_updated": true, "time_unix": 19, "epoch": 0, "loss": 1.0, "ce_loss": 1.0, "jepa_loss": 0.0, "peak_vram_bytes": 1610612736}
+{"step": 4, "optimizer_updated": true, "time_unix": 28, "epoch": 0, "loss": 1.0, "ce_loss": 1.0, "jepa_loss": 0.0, "peak_vram_bytes": 2147483648}
+{"event": "finished", "optimizer_steps": 4, "time_unix": 31}

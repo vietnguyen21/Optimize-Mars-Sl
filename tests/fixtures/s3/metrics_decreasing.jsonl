@@ -1,0 +1,4 @@
+{"event": "config", "config": {"stage": "sft", "max_length": 2048, "dropped_overlength": 2, "learning_rate": 0.0002}, "time_unix": 1}
+{"step": 1, "optimizer_updated": true, "time_unix": 10, "epoch": 0, "loss": 1.0, "ce_loss": 1.0, "jepa_loss": 0.0}
+{"step": 2, "optimizer_updated": true, "time_unix": 20, "epoch": 0, "loss": 1.0, "ce_loss": 1.0, "jepa_loss": 0.0}
+{"step": 1, "optimizer_updated": false, "time_unix": 24, "epoch": 0, "loss": 1.0, "ce_loss": 1.0, "jepa_loss": 0.0}
