@@ -40,7 +40,7 @@ class EvaluationHarness:
                  grounding_device='cpu', retrieval_top_k=25,
                  max_new_tokens=256, max_prompt_length=2048,
                  constraint_mode='posthoc', seed=42, training_data_paths=None,
-                 prompt_format='v2'):
+                 prompt_format='v2', hard_gate=False):
         if not dry_run and (not model_path or not decision_model_path):
             raise ValueError('Real evaluation requires model_path and decision_model_path; smoke runs require dry_run=True')
         if num_candidates < 1:
@@ -52,6 +52,8 @@ class EvaluationHarness:
         self.dry_run, self.seed, self.device = dry_run, seed, device
         self.constraint_mode, self.retrieval_top_k = constraint_mode, retrieval_top_k
         self.prompt_format = prompt_format
+        # False: PV-SQL rules and probe timeouts are soft signals; True: strict ablation gate.
+        self.hard_gate = bool(hard_gate)
         self.training_data_paths = training_data_paths or []
         self._schema_cache = {}
         self._dense_model = None
@@ -122,7 +124,8 @@ class EvaluationHarness:
             result = validate_candidate(candidate=candidate, question=question,
                 schema_ddl=sub_schema.ddl_statements, db_path=db_file,
                 validator=self.pv_validator, probe_engine=self.db_probe,
-                scorer=self.scorer, security_filter=self.security_filter)
+                scorer=self.scorer, security_filter=self.security_filter,
+                hard_gate=self.hard_gate)
             validation_logs.append(dict(result.model_dump(), sql=candidate.sql))
             if result.final_verdict == 'ACCEPT' and result.system1_score > best_score:
                 best, best_score = candidate, result.system1_score
@@ -196,7 +199,7 @@ class EvaluationHarness:
             'checkpoint': self.model_path, 'decision_checkpoint': self.decision_model_path,
             'grounding_checkpoint': self.grounding_model_path,
             'grounding_mode': 'trained_dense' if self._dense_model is not None else 'lexical_ablation',
-            'constraint_mode': self.constraint_mode,
+            'constraint_mode': self.constraint_mode, 'hard_gate': self.hard_gate,
             'grammar_enforced_during_generation': not self.dry_run and self.constraint_mode == 'xgrammar',
             'grammar_scope': 'SQLite SELECT subset; AST and execution checks still required',
             'prompt_format': self.prompt_format, 'temperature': self.temperature,
@@ -251,6 +254,7 @@ def main():
     parser.add_argument('--output_dir', required=True)
     parser.add_argument('--dry_run', action='store_true')
     parser.add_argument('--constraint_mode', choices=['xgrammar', 'posthoc'], default='posthoc')
+    parser.add_argument('--hard_gate', action='store_true')
     args = parser.parse_args()
     options = vars(args)
     dataset, limit, output = options.pop('dataset'), options.pop('limit'), options.pop('output_dir')

@@ -25,6 +25,8 @@ class DBProbeEngine:
         "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE",
         "REPLACE", "ATTACH", "DETACH", "PRAGMA WRITABLE_SCHEMA", "VACUUM"
     }
+    # Error kind prefix for a deadline interrupt; callers treat it apart from real SQL errors.
+    TIMEOUT_ERROR_PREFIX = "timeout:"
 
     def __init__(self, max_session_queries: int = 5, row_limit: int = 5, timeout: float = 1.5):
         self.max_session_queries: int = max_session_queries
@@ -66,24 +68,35 @@ class DBProbeEngine:
         # Check for destructive keywords
         upper_sql = clean_sql.upper()
         for kw in self.DESTRUCTIVE_KEYWORDS:
-            if re.search(rf"\b{kw}\b", upper_sql):
+            # REPLACE(x, a, b) is a read-only string function; only statement-level REPLACE writes.
+            pattern = rf"\b{kw}\b(?!\s*\()" if kw == "REPLACE" else rf"\b{kw}\b"
+            if re.search(pattern, upper_sql):
                 return False, None, f"Destructive operation blocked by read-only probe: '{kw}'"
 
         # Apply LIMIT <= 5
         probed_sql = self._sanitize_and_apply_limit(clean_sql)
 
         conn = None
+        timed_out = False
         self.query_count += 1  # Failed execution attempts also consume probe budget.
         try:
             conn_uri = f"file:{os.path.abspath(db_path)}?mode=ro"
             conn = sqlite3.connect(conn_uri, uri=True, timeout=self.timeout)
             conn.execute("PRAGMA query_only = ON")
             deadline = time.monotonic() + self.timeout
-            conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+
+            def _past_deadline() -> int:
+                nonlocal timed_out
+                timed_out = time.monotonic() > deadline
+                return int(timed_out)
+
+            conn.set_progress_handler(_past_deadline, 1000)
             cursor = conn.execute(probed_sql)
             rows = cursor.fetchmany(self.row_limit)
             return True, rows, None
         except sqlite3.DatabaseError as db_err:
+            if timed_out:
+                return False, None, f"{self.TIMEOUT_ERROR_PREFIX} probe exceeded {self.timeout}s deadline ({db_err})"
             return False, None, f"SQLite database error: {str(db_err)}"
         except Exception as err:
             return False, None, f"Execution failed: {str(err)}"

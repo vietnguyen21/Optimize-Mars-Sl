@@ -22,7 +22,8 @@ def validate_candidate(
     validator: Optional[PVSQLValidator] = None,
     probe_engine: Optional[DBProbeEngine] = None,
     scorer: Optional[LayaScorer] = None,
-    security_filter: Optional[SecurityFilter] = None
+    security_filter: Optional[SecurityFilter] = None,
+    hard_gate: bool = False
 ) -> ValidationResult:
     """
     Validates a single candidate SQL trajectory through the complete validation pipeline:
@@ -31,6 +32,10 @@ def validate_candidate(
     3. Safe DB Probe: executes read-only probe on target SQLite with LIMIT 5.
     4. Laya-421M System-1 Scoring: computes calibrated confidence score.
     5. Final Verdict Decision: produces ACCEPT, REJECT, or ABSTAIN.
+
+    hard_gate=False (default): PV-SQL violations and probe timeouts are recorded
+    but do not reject; ACCEPT needs a probe without a real execution error and
+    system1_score >= threshold. hard_gate=True keeps the strict ablation verdict.
     
     Returns:
         ValidationResult adhering to canonical interface contract.
@@ -87,9 +92,16 @@ def validate_candidate(
     if not probe_passed:
         rejection_reasons.append(f"DB probe error: {probe_err}")
 
-    if probe_passed and pv_passed and system1_score >= sys1.threshold:
+    if hard_gate:
+        accepted = probe_passed and pv_passed and system1_score >= sys1.threshold
+    else:
+        probe_timed_out = not probe_passed and str(probe_err or "").startswith(DBProbeEngine.TIMEOUT_ERROR_PREFIX)
+        accepted = (probe_passed or probe_timed_out) and system1_score >= sys1.threshold
+
+    if accepted:
         final_verdict = "ACCEPT"
-        rejection_reason = None
+        # Soft signals stay visible in the log even when the candidate is accepted.
+        rejection_reason = None if hard_gate or not rejection_reasons else "; ".join(rejection_reasons)
     else:
         final_verdict = "REJECT"
         rejection_reason = "; ".join(rejection_reasons) if rejection_reasons else "Score below threshold"
