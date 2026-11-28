@@ -73,14 +73,19 @@ class TestSynthetic(unittest.TestCase):
         self.assertEqual(res["n"], 8)
         self.assertEqual(res["probe"]["false_rejections"], 0)
 
-    def test_replace_is_blocked_keyword(self):
+    def test_replace_function_not_blocked(self):
+        # T23: REPLACE() string function passes the probe; statement-level REPLACE INTO stays blocked.
         rows = [{"question_id": "r:0", "db_id": "d1", "question": "Replace letters in names?",
                  "SQL": "SELECT REPLACE(name, 'a', 'b') FROM t"}]
         path = os.path.join(self.dir, "replace.jsonl")
         _write_jsonl(path, rows)
         res = m.measure_rule_frr(path, self.dir)
-        self.assertEqual(res["probe"]["false_rejections"], 1)
-        self.assertEqual(res["probe"]["by_error"].get("blocked_keyword"), 1)
+        self.assertEqual(res["probe"]["false_rejections"], 0)
+        self.assertEqual(res["probe"]["by_error"].get("blocked_keyword", 0), 0)
+        sql = "REPLACE INTO t VALUES (4, 'delta')"
+        ok, _, err = DBProbeEngine().probe_sql(sql, os.path.join(self.dir, "d1.sqlite"))
+        self.assertFalse(ok)
+        self.assertEqual(m.classify_probe_error(sql, err), "blocked_keyword")
 
     def test_failed_gold_not_in_n(self):
         rows = [{"question_id": "g:0", "db_id": "d1", "question": "Bad?", "SQL": "SELECT x FROM nothing"},
